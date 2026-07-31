@@ -2478,8 +2478,18 @@ mod tests {
         // architectural baseline.
         const { assert!(cfg!(target_arch = "aarch64")) };
         assert!(Backend::Neon.is_available(), "NEON must be available");
-        assert_eq!(detect(), Backend::Neon, "aarch64 must resolve to Neon");
-        assert_eq!(crate::fill_block::backend(), Backend::Neon);
+        if NEON_BEATS_SCALAR_PREMISE {
+            // Measured on Apple Silicon: the shootout picks NEON.
+            assert_eq!(detect(), Backend::Neon, "aarch64 must resolve to Neon");
+            assert_eq!(crate::fill_block::backend(), Backend::Neon);
+        } else {
+            // Everywhere else the shootout decides; on Neoverse N1 it
+            // correctly picks Scalar (NEON loses there by ~40%).
+            assert!(
+                matches!(detect(), Backend::Neon | Backend::Scalar),
+                "detection must pick one of the two runnable backends"
+            );
+        }
 
         // Exactly two backends are runnable here, and detection picked the
         // preferred one of them. Spelled as a set rather than as four separate

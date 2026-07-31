@@ -239,7 +239,16 @@ fn have_neon() -> bool {
 /// also the regime where the N1 regression shows. Cost is ~2 ms once per
 /// process: one pass over all four slices per rep, best of three reps, and
 /// the whole thing sits inside [`detect_and_cache`].
-#[cfg(all(feature = "std", target_arch = "aarch64", not(miri)))]
+///
+/// Release builds only: unoptimised NEON intrinsics lose to unoptimised
+/// scalar everywhere (per-intrinsic call overhead), so a debug shootout
+/// would measure codegen mode, not microarchitecture.
+#[cfg(all(
+    feature = "std",
+    target_arch = "aarch64",
+    not(miri),
+    not(debug_assertions)
+))]
 fn neon_wins_here() -> bool {
     use crate::block::{Instance, Position};
     use crate::params::{Algorithm, Params, Version};
@@ -303,8 +312,14 @@ fn neon_wins_here() -> bool {
 /// Everywhere the shootout cannot run the compile-time answer stands: NEON.
 /// Without `std` there is no clock (and `no_std` aarch64 targets are not the
 /// server parts the regression lives on); under Miri a wall-clock
-/// measurement is meaningless.
-#[cfg(not(all(feature = "std", target_arch = "aarch64", not(miri))))]
+/// measurement is meaningless; in debug builds it would measure codegen
+/// mode, not microarchitecture.
+#[cfg(not(all(
+    feature = "std",
+    target_arch = "aarch64",
+    not(miri),
+    not(debug_assertions)
+)))]
 #[inline]
 fn neon_wins_here() -> bool {
     true
@@ -439,7 +454,14 @@ mod tests {
             assert!(!have_sse2());
             assert!(!have_avx2());
             assert!(!have_avx512f());
-            assert_eq!(detect(), Backend::Neon);
+            if cfg!(target_vendor = "apple") {
+                // The shootout is measured to pick NEON on Apple Silicon.
+                assert_eq!(detect(), Backend::Neon);
+            } else {
+                // Everywhere else the shootout decides: Neoverse N1 gets
+                // Scalar, Apple-class cores get NEON.
+                assert!(matches!(detect(), Backend::Neon | Backend::Scalar));
+            }
         }
         if cfg!(target_arch = "x86_64") {
             // SSE2 is baseline on x86-64.

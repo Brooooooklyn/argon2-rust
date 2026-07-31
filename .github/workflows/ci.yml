@@ -130,5 +130,11 @@ jobs:
       # phc_decode: the PHC string parser, which eats attacker-controlled
       # input. tiny_hash: parameter validation + the whole hash pipeline at
       # fuzzer-derived shapes. Both assert only "never panics".
+      # -crt-static: the sanitizer runtime cannot link into this target's
+      # default static libc.
       - run: cargo fuzz run phc_decode -- -max_total_time=300
+        env:
+          RUSTFLAGS: -C target-feature=-crt-static
       - run: cargo fuzz run tiny_hash -- -max_total_time=300
+        env:
+          RUSTFLAGS: -C target-feature=-crt-static
