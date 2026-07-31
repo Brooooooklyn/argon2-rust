@@ -1,0 +1,5 @@
+# cargo-fuzz working state: regenerated on every run, machine-specific.
+target/
+corpus/
+artifacts/
+Cargo.lock
