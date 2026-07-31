@@ -5,6 +5,10 @@ edition = "2024"
 rust-version = "1.97"
 description = "Pure-Rust port of the reference Argon2 implementation (phc-winner-argon2), with runtime-dispatched SIMD backends"
 license = "CC0-1.0 OR Apache-2.0"
+repository = "https://github.com/Brooooooklyn/argon2-rust"
+homepage = "https://github.com/Brooooooklyn/argon2-rust"
+readme = "README.md"
+exclude = ["/.github", "/benches", "/tests", "/vm.sh"]
 keywords = ["argon2", "password-hash", "kdf", "simd", "crypto"]
 categories = ["cryptography", "no-std"]
 # Every bench target is declared explicitly below. Without this, Cargo would

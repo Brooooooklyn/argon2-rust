@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Vendored test reference: official KAT traces + differential-test C source.
+  # Independent clone (see .gitignore), pinned to a known-good commit.
+  PHC_COMMIT: f57e61e19229e23c4445b85494dbf7c07de721cb
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone phc-winner-argon2 (KAT traces + differential reference)
+        run: |
+          git clone --filter=blob:none https://github.com/P-H-C/phc-winner-argon2.git phc-winner-argon2
+          cd phc-winner-argon2 && git checkout "$PHC_COMMIT"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Full suite: KAT traces, official vectors, live differential vs the C
+      # (needs make + cc, present on both runners), reuse, allocation audit.
+      - name: cargo test (release)
+        run: cargo test --release
+
+      - name: cargo test (debug)
+        run: cargo test
+
+      - name: cargo test (--no-default-features)
+        run: cargo test --release --no-default-features
+
+      - name: cargo test (--all-features)
+        run: cargo test --release --all-features
+
+  windows:
+    name: build + unit tests (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The differential/KAT integration tests need the vendored C tree and
+      # make; unit tests cover the fill backends and core logic on Windows.
+      - run: cargo build --release
+      - run: cargo test --release --lib
+
+  no-std:
+    name: no_std build (thumbv7em-none-eabi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabi
+      - run: cargo build --release --no-default-features --target thumbv7em-none-eabi
+
+  benches-compile:
+    name: benches compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --benches --features internal-api
