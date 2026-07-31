@@ -3,6 +3,9 @@
 # Local profiling artifacts from unrelated tools
 mlx-profile-*.json
 
+# Local helper scripts (e.g. vm.sh); not part of the crate
+*.sh
+
 
 ### Created by https://www.gitignore.io
 ### macOS ###
