@@ -32,7 +32,13 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use argon2_rust::__internal::{ARENA_ALIGN, Arena, Block, Workspace, audit};
+use argon2_rust::__internal::{ARENA_ALIGN, Arena, Block, Workspace};
+// The `audit` release observer exists only when the library has `std` (it is
+// thread-local over the fill workers). Without `std` there is no `mmap`
+// backing either — every arena comes from the global allocator, so the spy
+// below is again a complete instrument and `released*` falls back to it.
+#[cfg(feature = "std")]
+use argon2_rust::__internal::audit;
 use argon2_rust::{Algorithm, Argon2, Error, Params, Version};
 
 // ---------------------------------------------------------------------------
@@ -206,6 +212,7 @@ impl Armed {
         FREED_DIRTY.with(|c| c.set(0));
         FREED_ANY_THREAD.store(0, Ordering::SeqCst);
         WATCH_SIZE.with(|c| c.set(blocks * size_of::<Block>()));
+        #[cfg(feature = "std")]
         audit::watch(blocks);
         Armed
     }
@@ -219,19 +226,34 @@ impl Armed {
     }
 
     /// Arenas of the watched size whose memory this thread released.
+    #[cfg(feature = "std")]
     fn released(&self) -> usize {
         audit::released()
     }
 
+    /// Without `std` every arena is a heap allocation, so the spy sees all
+    /// of them (see the comment on the `audit` import).
+    #[cfg(not(feature = "std"))]
+    fn released(&self) -> usize {
+        self.freed()
+    }
+
     /// How many of those still held a non-zero byte at release.
+    #[cfg(feature = "std")]
     fn released_dirty(&self) -> usize {
         audit::released_dirty()
+    }
+
+    #[cfg(not(feature = "std"))]
+    fn released_dirty(&self) -> usize {
+        self.freed_dirty()
     }
 }
 
 impl Drop for Armed {
     fn drop(&mut self) {
         WATCH_SIZE.with(|c| c.set(0));
+        #[cfg(feature = "std")]
         audit::watch(0);
     }
 }
@@ -488,6 +510,8 @@ fn arena_drop_wipes_before_it_frees() {
 /// would have *noticed* had the arena been dirty — without it, a green wipe test
 /// cannot tell "the wipe ran" from "the check never looked", which is precisely
 /// how the allocator spy silently stopped controlling anything once.
+/// Tests the `audit` observer itself, which only exists with `std`.
+#[cfg(feature = "std")]
 #[test]
 fn the_release_observer_can_tell_dirty_from_clean() {
     let mut arena = Arena::new(8).expect("arena");
