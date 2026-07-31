@@ -2165,7 +2165,6 @@ mod tests {
     /// current NEON schedule is *slower* than scalar (measured: 467 vs 331
     /// ns/block), so the assertion is skipped there and the uarch-aware
     /// choice belongs to `detect()` — see the note in `fill_block::mod`.
-    #[cfg(feature = "std")]
     const NEON_BEATS_SCALAR_PREMISE: bool =
         cfg!(all(target_vendor = "apple", target_arch = "aarch64"));
 

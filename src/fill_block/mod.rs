@@ -208,7 +208,17 @@ fn have_sse2() -> bool {
 #[cfg(all(feature = "std", target_arch = "aarch64"))]
 #[inline]
 fn have_neon() -> bool {
-    std::arch::is_aarch64_feature_detected!("neon")
+    // NEON (Advanced SIMD) is in the architectural baseline Apple and
+    // Windows guarantee for aarch64; probing the OS for it would be a
+    // formality, so on those platforms the answer is compile-time.
+    #[cfg(any(target_vendor = "apple", target_os = "windows"))]
+    {
+        true
+    }
+    #[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
+    {
+        std::arch::is_aarch64_feature_detected!("neon")
+    }
 }
 #[cfg(not(all(feature = "std", target_arch = "aarch64")))]
 #[inline]
@@ -221,24 +231,23 @@ fn have_neon() -> bool {
 // ---------------------------------------------------------------------------
 //
 // "Has NEON" and "NEON is the fastest fill" are different questions on
-// AArch64. The NEON schedule was tuned on Apple Silicon, where it beats
-// scalar by x1.5-x2. On Neoverse N1 (Ampere Altra; GitHub's
-// `ubuntu-24.04-arm` runners) the same schedule is *slower* than scalar —
-// 467 vs 331 ns/block, measured — and picking it there loses to the C
-// reference, which is scalar-only on AArch64. `is_aarch64_feature_detected!`
-// cannot see microarchitecture, so with `std` the cascade *measures* both
-// fill schedules, once per process inside the cached detect, and keeps the
-// winner. This is the only backend choice in the crate made by measurement
-// rather than by feature bit, and it is why the aarch64 perf assertions in
-// `neon::tests` are gated to Apple Silicon.
+// AArch64 — but only on platforms whose microarchitecture is unknown. On
+// Apple Silicon the NEON schedule beats scalar by x1.5-x2 (measured), and
+// Windows aarch64 is likewise a known, NEON-strong target (Snapdragon); on
+// both, NEON is simply the answer and there is nothing to detect. On
+// Neoverse N1 (Ampere Altra; GitHub's `ubuntu-24.04-arm` runners) the same
+// schedule is *slower* than scalar — 467 vs 331 ns/block, measured — and
+// picking it there loses to the C reference, which is scalar-only on
+// AArch64. So the shootout exists for the platforms that need it: aarch64
+// outside Apple and Windows, with `std`, in release.
 
 /// One shootout: both backends fill the same small instance, interleaved.
 ///
 /// The instance is 1 MiB single-lane — L2-resident on anything this runs on,
 /// so the measurement is the compute schedule rather than DRAM, which is
-/// also the regime where the N1 regression shows. Cost is ~2 ms once per
-/// process: one pass over all four slices per rep, best of three reps, and
-/// the whole thing sits inside [`detect_and_cache`].
+/// also the regime where the N1 regression shows. Cost is ~4 ms once per
+/// process: one pass over all four slices per rep, best of six reps per
+/// side, and the whole thing sits inside [`detect_and_cache`].
 ///
 /// Release builds only: unoptimised NEON intrinsics lose to unoptimised
 /// scalar everywhere (per-intrinsic call overhead), so a debug shootout
@@ -247,7 +256,8 @@ fn have_neon() -> bool {
     feature = "std",
     target_arch = "aarch64",
     not(miri),
-    not(debug_assertions)
+    not(debug_assertions),
+    not(any(target_vendor = "apple", target_os = "windows"))
 ))]
 fn neon_wins_here() -> bool {
     use crate::block::{Instance, Position};
@@ -255,7 +265,7 @@ fn neon_wins_here() -> bool {
     use std::time::Instant;
 
     const M_COST: u32 = 1024;
-    const REPS: usize = 3;
+    const REPS: usize = 6;
 
     let params = match Params::new(M_COST, 1, 1, 32) {
         Ok(params) => params,
@@ -273,7 +283,7 @@ fn neon_wins_here() -> bool {
         }
     }
 
-    let mut time = |backend: Backend| -> u128 {
+    let mut one_pass = |backend: Backend| -> u128 {
         let fill = fill_segment_fn(backend);
         // SAFETY: `arena` is a live allocation of exactly `blocks` `Block`s,
         // no reference into it is live while the raw pointer is, and the
@@ -289,36 +299,40 @@ fn neon_wins_here() -> bool {
                 &params,
             )
         };
-        let mut best = u128::MAX;
-        for _ in 0..REPS {
-            let t0 = Instant::now();
-            for slice in 0..crate::params::SYNC_POINTS {
-                // SAFETY: as above; single lane, in-range slice.
-                unsafe { fill(&instance, Position::new(0, 0, slice, 0)) };
-            }
-            best = best.min(t0.elapsed().as_nanos());
+        let t0 = Instant::now();
+        for slice in 0..crate::params::SYNC_POINTS {
+            // SAFETY: as above; single lane, in-range slice.
+            unsafe { fill(&instance, Position::new(0, 0, slice, 0)) };
         }
-        best
+        t0.elapsed().as_nanos()
     };
 
-    // A/B/A, so ordering cannot favour whichever runs later.
-    let scalar_a = time(Backend::Scalar);
-    let neon = time(Backend::Neon);
-    let scalar_b = time(Backend::Scalar);
+    // Finely interleaved pairs, min per side. This runs inside `detect()`,
+    // which can be called from a `cargo test` process running suites on
+    // parallel threads: a coarse A/B/A structure lets one contention window
+    // land on every rep of one side, while per-rep interleaving shares each
+    // window between both.
+    let mut scalar_best = u128::MAX;
+    let mut neon_best = u128::MAX;
+    for _ in 0..REPS {
+        scalar_best = scalar_best.min(one_pass(Backend::Scalar));
+        neon_best = neon_best.min(one_pass(Backend::Neon));
+    }
     core::hint::black_box(arena.as_ptr());
-    neon < scalar_a.min(scalar_b)
+    neon_best < scalar_best
 }
 
-/// Everywhere the shootout cannot run the compile-time answer stands: NEON.
-/// Without `std` there is no clock (and `no_std` aarch64 targets are not the
-/// server parts the regression lives on); under Miri a wall-clock
-/// measurement is meaningless; in debug builds it would measure codegen
-/// mode, not microarchitecture.
+/// Everywhere the shootout does not run, the answer is NEON: on Apple and
+/// Windows aarch64 because NEON is baseline and measured fastest there; on
+/// `no_std` because there is no clock (and those targets are not the server
+/// parts the regression lives on); under Miri and in debug builds because a
+/// wall-clock measurement means nothing there.
 #[cfg(not(all(
     feature = "std",
     target_arch = "aarch64",
     not(miri),
-    not(debug_assertions)
+    not(debug_assertions),
+    not(any(target_vendor = "apple", target_os = "windows"))
 )))]
 #[inline]
 fn neon_wins_here() -> bool {
@@ -344,7 +358,14 @@ static CACHED_BACKEND: AtomicU8 = AtomicU8::new(UNINIT);
 /// This always re-runs detection; use [`backend`] for the cached value.
 #[must_use]
 pub fn detect() -> Backend {
-    if have_avx512f() {
+    if cfg!(miri) {
+        // Miri interprets the crate: its intrinsic support stops around
+        // SSE2, and a wall-clock shootout means nothing under an
+        // interpreter. Scalar is the one backend that behaves identically
+        // on every host Miri runs on, which is also what makes the Miri CI
+        // job arch-independent.
+        Backend::Scalar
+    } else if have_avx512f() {
         Backend::Avx512
     } else if have_avx2() {
         Backend::Avx2

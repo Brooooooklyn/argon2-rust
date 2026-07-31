@@ -79,9 +79,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --benches --features internal-api
 
+  # The SIMD paths are platform-independent in behaviour (KAT-verified per
+  # backend), so the sanitizer-style jobs run on both arches: x86_64-linux
+  # covers the SSE2/AVX2/AVX-512 builds, aarch64-mac covers the NEON build.
+  # Under Miri, detect() returns Scalar on every host (see fill_block::mod),
+  # which is what makes the Miri matrix meaningful: same interpreted code,
+  # two host compilers and two arena backings (mmap on Linux, heap on macOS).
+
   miri:
-    name: miri (UB interpreter)
-    runs-on: ubuntu-latest
+    name: miri (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -99,8 +110,16 @@ jobs:
         run: cargo miri test --release --test allocation_audit
 
   asan:
-    name: asan (x86_64-linux)
-    runs-on: ubuntu-latest
+    name: asan (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Clone phc-winner-argon2 (KAT traces + differential reference)
@@ -113,13 +132,24 @@ jobs:
       # (a rustc limitation, not a bug here). Everything else — the full
       # suite including the live-C differential — runs under ASan.
       - name: cargo test --release (ASan)
-        run: cargo test --release --lib --tests --target x86_64-unknown-linux-gnu
+        run: cargo test --release --lib --tests --target ${{ matrix.target }}
         env:
           RUSTFLAGS: -Zsanitizer=address
 
   fuzz:
-    name: fuzz (libFuzzer, 2 x 5 min)
-    runs-on: ubuntu-latest
+    name: fuzz (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # --target gnu: cargo-fuzz defaults to x86_64-unknown-linux-musl
+          # on Linux, whose static libc the sanitizer runtime cannot link
+          # into. macOS fuzzes its native target.
+          - os: ubuntu-latest
+            target-flag: --target x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target-flag: ""
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -130,11 +160,5 @@ jobs:
       # phc_decode: the PHC string parser, which eats attacker-controlled
       # input. tiny_hash: parameter validation + the whole hash pipeline at
       # fuzzer-derived shapes. Both assert only "never panics".
-      # -crt-static: the sanitizer runtime cannot link into this target's
-      # default static libc.
-      - run: cargo fuzz run phc_decode -- -max_total_time=300
-        env:
-          RUSTFLAGS: -C target-feature=-crt-static
-      - run: cargo fuzz run tiny_hash -- -max_total_time=300
-        env:
-          RUSTFLAGS: -C target-feature=-crt-static
+      - run: cargo fuzz run phc_decode ${{ matrix.target-flag }} -- -max_total_time=300
+      - run: cargo fuzz run tiny_hash ${{ matrix.target-flag }} -- -max_total_time=300
