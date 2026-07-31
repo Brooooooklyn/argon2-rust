@@ -187,7 +187,9 @@ const WIPE_THREAD_THRESHOLD: usize = 64 * 1024 * 1024;
 ///
 /// `core::arch::asm!` is stable only on a fixed list of architectures. Anywhere
 /// else the volatile loop is the fallback, which is correct and merely slow.
-const HAVE_ASM_BARRIER: bool = cfg!(any(
+/// Miri interprets the crate and does not support inline assembly at all, so
+/// it takes the fallback too.
+const HAVE_ASM_BARRIER: bool = cfg!(all(not(miri), any(
     target_arch = "x86",
     target_arch = "x86_64",
     target_arch = "arm",
@@ -196,7 +198,7 @@ const HAVE_ASM_BARRIER: bool = cfg!(any(
     target_arch = "riscv64",
     target_arch = "loongarch64",
     target_arch = "s390x",
-));
+)));
 
 /// `secure_wipe_memory()`: zero a region in a way the optimiser may not remove.
 ///

@@ -217,6 +217,100 @@ fn have_neon() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// AArch64: does NEON actually win here?
+// ---------------------------------------------------------------------------
+//
+// "Has NEON" and "NEON is the fastest fill" are different questions on
+// AArch64. The NEON schedule was tuned on Apple Silicon, where it beats
+// scalar by x1.5-x2. On Neoverse N1 (Ampere Altra; GitHub's
+// `ubuntu-24.04-arm` runners) the same schedule is *slower* than scalar —
+// 467 vs 331 ns/block, measured — and picking it there loses to the C
+// reference, which is scalar-only on AArch64. `is_aarch64_feature_detected!`
+// cannot see microarchitecture, so with `std` the cascade *measures* both
+// fill schedules, once per process inside the cached detect, and keeps the
+// winner. This is the only backend choice in the crate made by measurement
+// rather than by feature bit, and it is why the aarch64 perf assertions in
+// `neon::tests` are gated to Apple Silicon.
+
+/// One shootout: both backends fill the same small instance, interleaved.
+///
+/// The instance is 1 MiB single-lane — L2-resident on anything this runs on,
+/// so the measurement is the compute schedule rather than DRAM, which is
+/// also the regime where the N1 regression shows. Cost is ~2 ms once per
+/// process: one pass over all four slices per rep, best of three reps, and
+/// the whole thing sits inside [`detect_and_cache`].
+#[cfg(all(feature = "std", target_arch = "aarch64", not(miri)))]
+fn neon_wins_here() -> bool {
+    use crate::block::{Instance, Position};
+    use crate::params::{Algorithm, Params, Version};
+    use std::time::Instant;
+
+    const M_COST: u32 = 1024;
+    const REPS: usize = 3;
+
+    let params = match Params::new(M_COST, 1, 1, 32) {
+        Ok(params) => params,
+        Err(_) => return true, // unreachable at these constants; keep NEON
+    };
+    let blocks = params.memory_layout().0 as usize;
+    let mut arena = match crate::memory::Arena::new(blocks) {
+        Ok(arena) => arena,
+        Err(_) => return true, // 1 MiB; if even that fails, keep NEON
+    };
+    // Non-zero, non-constant seed, so no implementation detail can shortcut.
+    for (i, block) in arena.as_mut_slice().iter_mut().enumerate() {
+        for (j, w) in block.0.iter_mut().enumerate() {
+            *w = 0x9E37_79B9_7F4A_7C15u64.wrapping_mul((i * 128 + j) as u64 + 1);
+        }
+    }
+
+    let mut time = |backend: Backend| -> u128 {
+        let fill = fill_segment_fn(backend);
+        // SAFETY: `arena` is a live allocation of exactly `blocks` `Block`s,
+        // no reference into it is live while the raw pointer is, and the
+        // instance is one lane on one thread, so every position below is in
+        // range with no concurrent access. `fill` is one of scalar/neon, both
+        // executable on any aarch64 CPU.
+        let instance = unsafe {
+            Instance::new(
+                arena.as_mut_ptr(),
+                blocks,
+                Algorithm::Argon2id,
+                Version::V0x13,
+                &params,
+            )
+        };
+        let mut best = u128::MAX;
+        for _ in 0..REPS {
+            let t0 = Instant::now();
+            for slice in 0..crate::params::SYNC_POINTS {
+                // SAFETY: as above; single lane, in-range slice.
+                unsafe { fill(&instance, Position::new(0, 0, slice, 0)) };
+            }
+            best = best.min(t0.elapsed().as_nanos());
+        }
+        best
+    };
+
+    // A/B/A, so ordering cannot favour whichever runs later.
+    let scalar_a = time(Backend::Scalar);
+    let neon = time(Backend::Neon);
+    let scalar_b = time(Backend::Scalar);
+    core::hint::black_box(arena.as_ptr());
+    neon < scalar_a.min(scalar_b)
+}
+
+/// Everywhere the shootout cannot run the compile-time answer stands: NEON.
+/// Without `std` there is no clock (and `no_std` aarch64 targets are not the
+/// server parts the regression lives on); under Miri a wall-clock
+/// measurement is meaningless.
+#[cfg(not(all(feature = "std", target_arch = "aarch64", not(miri))))]
+#[inline]
+fn neon_wins_here() -> bool {
+    true
+}
+
+// ---------------------------------------------------------------------------
 // Detection and caching
 // ---------------------------------------------------------------------------
 
@@ -241,7 +335,7 @@ pub fn detect() -> Backend {
         Backend::Avx2
     } else if have_sse2() {
         Backend::Sse2
-    } else if have_neon() {
+    } else if have_neon() && neon_wins_here() {
         Backend::Neon
     } else {
         Backend::Scalar

@@ -1,0 +1,27 @@
+[package]
+name = "argon2-rust-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+argon2-rust = { path = ".." }
+
+[[bin]]
+name = "phc_decode"
+path = "fuzz_targets/phc_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "tiny_hash"
+path = "fuzz_targets/tiny_hash.rs"
+test = false
+doc = false
+
+# Standalone workspace: this crate must not leak into the library's builds.
+[workspace]
