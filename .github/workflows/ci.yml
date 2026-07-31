@@ -142,13 +142,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # --target gnu: cargo-fuzz defaults to x86_64-unknown-linux-musl
-          # on Linux, whose static libc the sanitizer runtime cannot link
-          # into. macOS fuzzes its native target.
+          # --target is explicit on both: cargo-fuzz's defaults are
+          # x86_64-unknown-linux-musl on Linux (static libc — the sanitizer
+          # runtime cannot link into it) and x86_64-apple-darwin on macOS
+          # (not the runner's native target, std not installed).
           - os: ubuntu-latest
             target-flag: --target x86_64-unknown-linux-gnu
           - os: macos-latest
-            target-flag: ""
+            target-flag: --target aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
