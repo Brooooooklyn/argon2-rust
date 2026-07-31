@@ -7,6 +7,10 @@ description = "Pure-Rust port of the reference Argon2 implementation (phc-winner
 license = "CC0-1.0 OR Apache-2.0"
 keywords = ["argon2", "password-hash", "kdf", "simd", "crypto"]
 categories = ["cryptography", "no-std"]
+# Every bench target is declared explicitly below. Without this, Cargo would
+# also auto-discover anything matching `benches/*.rs`, and `benches/support/`
+# holds a module both benches `#[path]`-include rather than a bench of its own.
+autobenches = false
 
 # The library target is `argon2_rust` (dashes become underscores).
 # Tests and benches use `use argon2_rust::...`.
@@ -78,6 +82,14 @@ criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "argon2"
+harness = false
+
+# The fast iteration harness. Criterion is the right tool for a publishable
+# number and the wrong one for a five-second edit-measure loop, so this is a
+# plain `fn main()` that times `fill_memory_blocks` directly. See the module
+# docs in `benches/micro.rs` for the invocation.
+[[bench]]
+name = "micro"
 harness = false
 
 # Resident-set-size checks, which are a property of a *process* and therefore

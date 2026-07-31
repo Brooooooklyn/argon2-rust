@@ -32,7 +32,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use argon2_rust::__internal::{ARENA_ALIGN, Arena, Block, Workspace};
+use argon2_rust::__internal::{ARENA_ALIGN, Arena, Block, Workspace, audit};
 use argon2_rust::{Algorithm, Argon2, Error, Params, Version};
 
 // ---------------------------------------------------------------------------
@@ -179,7 +179,25 @@ fn live() -> Live {
     }
 }
 
-/// Arms this thread's spy for regions of `blocks * 1024` bytes. Disarms on drop.
+/// Arms this thread's two observers for arenas of `blocks` blocks. Disarms on
+/// drop.
+///
+/// # Why there are two
+///
+/// The allocator spy above can only see an arena that came from the global
+/// allocator. On Linux an arena of any real size is an anonymous **mapping**
+/// (`src/memory.rs`, `Backing::Mapped`) — `mmap` + `MADV_HUGEPAGE`, because
+/// `alloc_zeroed` at `ARENA_ALIGN` was `posix_memalign` plus a `memset` that
+/// took all 65536 page faults of a 256 MiB arena on the calling thread. The spy
+/// sees exactly nothing of that, and — this is the part that matters for a
+/// security check — it would have gone *green*, not red.
+///
+/// So the release check moved to where the release is, in
+/// `memory::audit`. [`Armed::released`] is the one to assert on: it works on
+/// both backings and it looks at the arena itself rather than at "an allocation
+/// whose size and alignment happen to match an arena". [`Armed::freed`] stays
+/// because the allocator spy is still the right instrument for the *heap*, and
+/// because its own control test needs it.
 struct Armed;
 
 impl Armed {
@@ -188,6 +206,7 @@ impl Armed {
         FREED_DIRTY.with(|c| c.set(0));
         FREED_ANY_THREAD.store(0, Ordering::SeqCst);
         WATCH_SIZE.with(|c| c.set(blocks * size_of::<Block>()));
+        audit::watch(blocks);
         Armed
     }
 
@@ -198,11 +217,22 @@ impl Armed {
     fn freed_dirty(&self) -> usize {
         FREED_DIRTY.with(Cell::get)
     }
+
+    /// Arenas of the watched size whose memory this thread released.
+    fn released(&self) -> usize {
+        audit::released()
+    }
+
+    /// How many of those still held a non-zero byte at release.
+    fn released_dirty(&self) -> usize {
+        audit::released_dirty()
+    }
 }
 
 impl Drop for Armed {
     fn drop(&mut self) {
         WATCH_SIZE.with(|c| c.set(0));
+        audit::watch(0);
     }
 }
 
@@ -446,15 +476,35 @@ fn arena_drop_wipes_before_it_frees() {
         assert!(!arena.is_known_zeroed());
     }
 
-    assert_eq!(armed.freed(), 1, "the arena was not freed");
+    assert_eq!(armed.released(), 1, "the arena's memory was not released");
     if WIPES {
-        assert_eq!(armed.freed_dirty(), 0, "a dirty arena reached the allocator");
+        assert_eq!(armed.released_dirty(), 0, "a dirty arena was released");
     }
+}
+
+/// CONTROL for the release observer, the other half of the pair above.
+///
+/// `released() == 1` proves `Arena::drop` calls the hook. This proves the hook
+/// would have *noticed* had the arena been dirty — without it, a green wipe test
+/// cannot tell "the wipe ran" from "the check never looked", which is precisely
+/// how the allocator spy silently stopped controlling anything once.
+#[test]
+fn the_release_observer_can_tell_dirty_from_clean() {
+    let mut arena = Arena::new(8).expect("arena");
+    assert!(!audit::is_dirty(&arena), "a fresh arena is zero");
+
+    arena.as_mut_slice()[3].fill(0xA5);
+    assert!(audit::is_dirty(&arena), "the observer missed a dirty block");
+
+    for block in arena.as_mut_slice() {
+        block.fill(0);
+    }
+    assert!(!audit::is_dirty(&arena), "the observer sees phantom dirt");
 }
 
 /// The reuse path's version of the same thing: the arena is wiped when the
 /// borrower gives it back, and it is still wiped when the workspace itself is
-/// finally dropped. Both events must reach the allocator clean.
+/// finally dropped. Both events must be observed clean.
 #[test]
 fn a_workspace_never_frees_a_dirty_arena() {
     const N: usize = 64;
@@ -477,9 +527,9 @@ fn a_workspace_never_frees_a_dirty_arena() {
         // Dropping the workspace frees the parked arena.
     }
 
-    assert_eq!(armed.freed(), 1, "the parked arena was leaked");
+    assert_eq!(armed.released(), 1, "the parked arena was leaked");
     if WIPES {
-        assert_eq!(armed.freed_dirty(), 0, "a dirty arena reached the allocator");
+        assert_eq!(armed.released_dirty(), 0, "a dirty arena was released");
     }
 }
 
@@ -505,12 +555,12 @@ fn a_pooled_hash_leaves_nothing_behind_when_the_hasher_dies() {
         assert_eq!(hasher.reserved_blocks(), blocks, "reuse is not happening");
     }
 
-    assert_eq!(armed.freed(), 1, "the hasher leaked its arena");
+    assert_eq!(armed.released(), 1, "the hasher leaked its arena");
     if WIPES {
         assert_eq!(
-            armed.freed_dirty(),
+            armed.released_dirty(),
             0,
-            "a hasher freed an arena still holding derived material"
+            "a hasher released an arena still holding derived material"
         );
     }
 }
@@ -637,13 +687,13 @@ fn alternating_costs_settle_on_one_arena() {
         }
     }
     assert_eq!(
-        armed.freed(),
+        armed.released(),
         0,
-        "the large arena was freed and reallocated during the churn"
+        "the large arena was released and reallocated during the churn"
     );
     drop(armed);
 
-    // The spy above proves the *large* arena was never freed. This proves the
+    // The observer above proves the *large* arena was never released. This proves the
     // other half — that nothing else was allocated and kept either, so the churn
     // settles on one arena rather than accumulating one per switch.
     assert_eq!(
@@ -695,12 +745,12 @@ fn growth_frees_the_old_arena_before_it_allocates_the_new_one() {
 
     let armed = Armed::on(OLD);
     ws.reserve(1026).expect("grow");
-    assert_eq!(armed.freed(), 1, "the old arena was leaked on growth");
+    assert_eq!(armed.released(), 1, "the old arena was leaked on growth");
     if WIPES {
         assert_eq!(
-            armed.freed_dirty(),
+            armed.released_dirty(),
             0,
-            "growth freed an arena that still held the previous tenant's bytes"
+            "growth released an arena that still held the previous tenant's bytes"
         );
     }
     drop(armed);
@@ -725,12 +775,12 @@ fn release_wipes_the_arena_it_decides_not_to_keep() {
 
     let armed = Armed::on(SMALL);
     ws.release(small); // wiped, then dropped because the parked arena is larger
-    assert_eq!(armed.freed(), 1, "the rejected arena was leaked");
+    assert_eq!(armed.released(), 1, "the rejected arena was leaked");
     if WIPES {
         assert_eq!(
-            armed.freed_dirty(),
+            armed.released_dirty(),
             0,
-            "release freed a dirty arena instead of wiping it"
+            "release let a dirty arena go instead of wiping it"
         );
     }
     drop(armed);
@@ -754,10 +804,10 @@ fn growing_a_hasher_frees_its_old_arena_wiped() {
     hasher.set_argon2(Argon2::new(Algorithm::Argon2id, Version::V0x13, large));
     hasher.hash_into(b"password", b"somesalt", &mut tag).expect("large hash");
 
-    assert_eq!(armed.freed(), 1, "the small arena was leaked when the hasher grew");
+    assert_eq!(armed.released(), 1, "the small arena was leaked when the hasher grew");
     if WIPES {
         assert_eq!(
-            armed.freed_dirty(),
+            armed.released_dirty(),
             0,
             "growing a hasher leaked the previous password's derived material"
         );
@@ -892,13 +942,13 @@ fn verify_encoded_cannot_let_the_input_string_set_the_high_water_mark() {
         .verify_encoded(&encoded_large, b"password", Algorithm::Argon2id)
         .expect("a bigger m_cost must still verify");
     assert_eq!(
-        armed.freed(),
+        armed.released(),
         1,
         "the oversized arena should have been allocated and freed inside the call"
     );
     if WIPES {
         assert_eq!(
-            armed.freed_dirty(),
+            armed.released_dirty(),
             0,
             "the oversized arena was freed still holding derived material"
         );
@@ -948,7 +998,7 @@ fn verify_encoded_cannot_let_the_input_string_set_the_high_water_mark() {
         .verify_encoded(&encoded_large, b"password", Algorithm::Argon2id)
         .expect("verify");
     assert_eq!(
-        armed.freed(),
+        armed.released(),
         0,
         "a string that fits the arena the owner already paid for must reuse it"
     );

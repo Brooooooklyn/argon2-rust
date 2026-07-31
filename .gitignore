@@ -1,5 +1,8 @@
 /target
 
+# Local profiling artifacts from unrelated tools
+mlx-profile-*.json
+
 
 ### Created by https://www.gitignore.io
 ### macOS ###

@@ -416,6 +416,7 @@ unsafe fn unswap_quarters(a0: &mut __m512i, a1: &mut __m512i) {
 /// `state[8i+0] .. state[8i+7]` in order, so this function takes them in that
 /// same positional order and returns them in it too; the names below record
 /// which role each slot plays inside the macro.
+///
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 unsafe fn blake2_round_1(
@@ -592,56 +593,116 @@ unsafe fn fill_block(
         }
     }
 
-    // opt.c:57-61 — columns. `BLAKE2_ROUND_1(state[8i+0] .. state[8i+7])`, with
-    // the macro's `A0 C0 B0 D0 A1 C1 B1 D1` naming; see the module docs.
-    for i in 0..2 {
-        let base = 8 * i;
-        // SAFETY: `base + 7 <= 15`; the round needs AVX512F, as does this
-        // function.
-        let r = unsafe {
-            blake2_round_1(
-                state[base],
-                state[base + 1],
-                state[base + 2],
-                state[base + 3],
-                state[base + 4],
-                state[base + 5],
-                state[base + 6],
-                state[base + 7],
-            )
-        };
-        for (k, value) in r.into_iter().enumerate() {
-            state[base + k] = value;
-        }
+    // opt.c:57-67 — two column rounds then two row rounds.
+    //
+    // # Why these four rounds are written out instead of looped
+    //
+    // `opt.c` writes them as `for (i = 0; i < 2; ++i)` because it was written
+    // for a machine with 16 vector registers, where the shape of the loop
+    // cannot matter: `state` has to live in memory either way. Sapphire Rapids
+    // has 32 `zmm`, so the shape *does* matter, and a runtime `i` is what stops
+    // LLVM from exploiting them — with `base` unknown, every `state[base + k]`
+    // is a real load and a real store against the stack slot, and nothing can be
+    // kept in a register across a round.
+    //
+    // Making all 32 indices literal turns the whole array into SSA values that
+    // the register allocator can place. Measured on this backend, per block:
+    //
+    // | | rolled | unrolled |
+    // |---|---|---|
+    // | dynamic instructions | 823 | 574 |
+    // | `zmm` spill stores | 53 | 5 |
+    // | `zmm` spill reloads | 50 | 5 |
+    // | arithmetic (`vpmuludq`/`vpaddq`/`vprolq`) | identical | identical |
+    //
+    // The arithmetic is untouched — this only removes the loop's addressing and
+    // the memory traffic it forced.
+    //
+    // # ⚠ Do not hand-fuse the swaps between the column and row passes
+    //
+    // `BLAKE2_ROUND_1` ends with four `SWAP_HALVES` and `BLAKE2_ROUND_2` opens
+    // with four `SWAP_QUARTERS`, which *is* `SWAP_HALVES` followed by the
+    // [`QUARTER_IDX`] permutation. `SWAP_HALVES` is an involution, and the two
+    // act on the same eight register pairs in the same order — `(s0,s2)`,
+    // `(s1,s3)`, `(s4,s6)`, `(s5,s7)` and the same four in the upper group —
+    // so on paper the two quartets annihilate and 32 `vshufi64x2` per block
+    // fall out.
+    //
+    // **That was implemented and measured, and it changes nothing.** LLVM
+    // already does it: with the rounds unrolled, the whole permutation chain is
+    // one shuffle DAG it collapses by itself. Hand-fusing produced an identical
+    // op mix in the hot loop — `vshufi64x2` 34, `vpermq` 210, 277 shuffle uops
+    // either way — and the same runtime. The rolled `opt.c` form is what hides
+    // this from the C, not the macro boundary; unrolling is what exposes it,
+    // and unrolling is already done above.
+    //
+    // The op count is not the binding constraint here in any case. Measured on
+    // this core (`vpaddq` 2.2/cycle, `vpmuludq` 2.0, `vpermq` 1.11, `vprolq`
+    // 1.11, clock 2.66 GHz under this mix), the per-block port floor is ~262
+    // cycles against a measured 346 at `m=2048`, where every access is L2-hot.
+    // The kernel is **latency-bound on the round chain**, not issue-bound, which
+    // is also why unrolling bought 2% rather than the 30% its instruction count
+    // suggested. Removing arithmetic from this kernel is not where time is.
+    macro_rules! round_1 {
+        ($base:expr) => {{
+            // SAFETY: every index is a literal `< 16`; the round needs AVX512F,
+            // as does this function.
+            let r = unsafe {
+                blake2_round_1(
+                    state[$base],
+                    state[$base + 1],
+                    state[$base + 2],
+                    state[$base + 3],
+                    state[$base + 4],
+                    state[$base + 5],
+                    state[$base + 6],
+                    state[$base + 7],
+                )
+            };
+            state[$base] = r[0];
+            state[$base + 1] = r[1];
+            state[$base + 2] = r[2];
+            state[$base + 3] = r[3];
+            state[$base + 4] = r[4];
+            state[$base + 5] = r[5];
+            state[$base + 6] = r[6];
+            state[$base + 7] = r[7];
+        }};
     }
 
-    // opt.c:63-67 — rows.
     // `BLAKE2_ROUND_2(state[2*0+i], state[2*1+i], ..., state[2*7+i])`, so
     // result `k` goes back to slot `2k + i`.
-    //
-    // Written with direct indices rather than an array of them: holding the
-    // indices in an array makes LLVM spill it and lose the proof that every
-    // index is `< 16`, which leaves a `panic_bounds_check` in the emitted code
-    // (measured on `avx2.rs`, which had exactly that shape).
-    for i in 0..2 {
-        // SAFETY: `14 + i <= 15`; the round needs AVX512F, as does this
-        // function.
-        let r = unsafe {
-            blake2_round_2(
-                state[i],
-                state[2 + i],
-                state[4 + i],
-                state[6 + i],
-                state[8 + i],
-                state[10 + i],
-                state[12 + i],
-                state[14 + i],
-            )
-        };
-        for (k, value) in r.into_iter().enumerate() {
-            state[2 * k + i] = value;
-        }
+    macro_rules! round_2 {
+        ($i:expr) => {{
+            // SAFETY: `14 + $i <= 15`; the round needs AVX512F, as does this
+            // function.
+            let r = unsafe {
+                blake2_round_2(
+                    state[$i],
+                    state[2 + $i],
+                    state[4 + $i],
+                    state[6 + $i],
+                    state[8 + $i],
+                    state[10 + $i],
+                    state[12 + $i],
+                    state[14 + $i],
+                )
+            };
+            state[$i] = r[0];
+            state[2 + $i] = r[1];
+            state[4 + $i] = r[2];
+            state[6 + $i] = r[3];
+            state[8 + $i] = r[4];
+            state[10 + $i] = r[5];
+            state[12 + $i] = r[6];
+            state[14 + $i] = r[7];
+        }};
     }
+
+    round_1!(0);
+    round_1!(8);
+    round_2!(0);
+    round_2!(1);
 
     // SAFETY: as the load loop above.
     unsafe {
@@ -650,6 +711,89 @@ unsafe fn fill_block(
             _mm512_storeu_si512(nextp.add(i), state[i]);
         }
     }
+}
+
+/// How many blocks ahead [`fill_segment_impl`] prefetches the reference block
+/// on the data-independent path.
+///
+/// One block of compute is ~346 cycles (~130 ns at the 2.66 GHz this core runs
+/// at under this instruction mix), and a random read into a multi-hundred-MiB
+/// arena is ~100 ns, so one block of lead is already enough to cover the miss;
+/// the value is 2 to leave slack for the reference block that is itself an L3
+/// hit and returns early. Measured across 1..4 — see the table at the use site.
+const PREFETCH_DISTANCE: u32 = 2;
+
+/// Pull one whole [`Block`] towards L1.
+///
+/// A block is 1 KiB, so 16 lines. They are issued as 16 separate `prefetcht0`
+/// rather than trusting the L2 streamer, because the access is a single
+/// isolated 1 KiB burst at a random address: there is no stride for the
+/// streamer to lock onto, and by the time it could react the demand loads have
+/// already been issued.
+///
+/// `prefetcht0` is architecturally a hint. It cannot fault, cannot trap on an
+/// unmapped or misaligned address, and cannot change any architectural state
+/// other than the cache — so **no value computed by this function can affect
+/// the output**, which is why the address arithmetic feeding it does not need
+/// the same scrutiny as the real one.
+///
+/// # Safety
+///
+/// None beyond the pointer being a `*const Block` — see above. `unsafe` only
+/// because `_mm_prefetch` is.
+#[inline(always)]
+unsafe fn prefetch_block<const HINT: i32>(block: *const Block) {
+    let base = block.cast::<i8>();
+    // SAFETY: `_mm_prefetch` is SSE; the offsets stay inside the 1 KiB block,
+    // and it would be sound even if they did not.
+    unsafe {
+        let mut k = 0;
+        while k < core::mem::size_of::<Block>() {
+            _mm_prefetch::<HINT>(base.add(k));
+            k += 64;
+        }
+    }
+}
+
+/// The reference-block offset for block `index` of the segment `position` is
+/// in, given that block's pseudo-random word.
+///
+/// This is `opt.c:254-271` lifted out of the loop body so that the loop can run
+/// it a second time, for a block it has not reached yet, to drive
+/// [`prefetch_block`]. The real path calls it too, so there is exactly one copy
+/// of the rule and the prefetch cannot drift away from the address it is
+/// predicting.
+///
+/// # Safety
+///
+/// Nothing is dereferenced; the result is only in bounds for a well-formed
+/// instance and an `index < instance.segment_length`. Callers that feed it to
+/// anything but a prefetch must uphold that.
+#[inline(always)]
+fn ref_offset_for(instance: &Instance, position: &Position, index: u32, pseudo_rand: u64) -> u32 {
+    // opt.c:254-259.
+    let mut ref_lane = ((pseudo_rand >> 32) % u64::from(instance.lanes)) as u32;
+    if position.pass == 0 && position.slice == 0 {
+        // Cannot reference other lanes yet.
+        ref_lane = position.lane;
+    }
+
+    // opt.c:264-266 — `index_alpha` takes the LOW 32 bits.
+    let mut at = *position;
+    at.index = index;
+    let ref_index = crate::core::index_alpha(
+        instance,
+        &at,
+        (pseudo_rand & 0xFFFF_FFFF) as u32,
+        ref_lane == position.lane,
+    );
+
+    // opt.c:269-271. Evaluated in `u64` because the C's `ref_lane` is a
+    // `uint64_t`; for a well-formed instance the sum is < memory_blocks.
+    let ref_offset_u64 =
+        u64::from(instance.lane_length) * u64::from(ref_lane) + u64::from(ref_index);
+    debug_assert!(ref_offset_u64 < instance.memory_len() as u64);
+    ref_offset_u64 as u32
 }
 
 /// `next_addresses()` — `opt.c:148-172`.
@@ -715,7 +859,7 @@ unsafe fn next_addresses(address_block: *mut Block, input_block: *mut Block) {
 ///
 /// See [`crate::fill_block::FillSegmentFn`]. The CPU must support AVX-512F.
 #[inline(always)]
-unsafe fn fill_segment_impl(instance: &Instance, mut position: Position) {
+unsafe fn fill_segment_impl(instance: &Instance, position: Position) {
     // `opt.c:190` is `if (instance == NULL) return;`. A `&Instance` is never
     // null, but the `%` operators below would divide by zero on a degenerate
     // instance and this crate must not panic, so guard those instead. Same
@@ -805,8 +949,8 @@ unsafe fn fill_segment_impl(instance: &Instance, mut position: Position) {
         }
 
         // 1.2.1 Taking the pseudo-random value (opt.c:244-251).
+        let slot = (i % ADDRESSES_IN_BLOCK_U32) as usize;
         let pseudo_rand: u64 = if data_independent_addressing {
-            let slot = (i % ADDRESSES_IN_BLOCK_U32) as usize;
             if slot == 0 {
                 // SAFETY: as the `next_addresses` call above.
                 unsafe {
@@ -816,7 +960,22 @@ unsafe fn fill_segment_impl(instance: &Instance, mut position: Position) {
             address_block.0[slot]
         } else {
             // The C reads this from memory, not from `state`, even though the
-            // two are equal here; kept identical for exact parity with `ref.c`.
+            // two are provably equal here (`state` holds `memory[prev_offset]`
+            // at this point — see the load before the loop).
+            //
+            // ⚠ MEASURED, DO NOT "OPTIMISE" THIS: reading it out of the
+            // register instead, with
+            // `_mm_cvtsi128_si64(_mm512_castsi512_si128(state[0]))`, is
+            // **2.1% SLOWER** on this backend — 236.09 -> 241.15 ms, 7 of 8
+            // alternating A/B pairs, Argon2d `m=262144 t=3 p=1`, Sapphire
+            // Rapids. The theory it was tried on — that a 512-bit store cannot
+            // forward to a 64-bit load, so this load eats a drain-to-L1 stall
+            // at the head of the address chain — does not hold: the store is
+            // 64-byte aligned and the load takes its first 8 bytes, which is
+            // the case store-to-load forwarding handles best. What the register
+            // read costs instead is a `vmovq zmm->GPR` plus keeping `state[0]`
+            // live in a physical register at a point where the allocator wants
+            // it spilled, and that is dearer than the forwarded load.
             //
             // SAFETY: `prev_offset` is a block this lane has already finalised
             // (earlier in this segment, or the last block of the lane on a
@@ -824,28 +983,53 @@ unsafe fn fill_segment_impl(instance: &Instance, mut position: Position) {
             unsafe { (*instance.block_ptr(prev_offset)).0[0] }
         };
 
-        // 1.2.2 Computing the lane of the reference block (opt.c:254-259).
-        let mut ref_lane = ((pseudo_rand >> 32) % u64::from(instance.lanes)) as u32;
-        if position.pass == 0 && position.slice == 0 {
-            // Cannot reference other lanes yet.
-            ref_lane = position.lane;
+        // 1.2.2 / 1.2.3 (opt.c:254-271).
+        let ref_offset = ref_offset_for(instance, &position, i, pseudo_rand);
+
+        // Reach forward on the data-independent path.
+        //
+        // `address_block` holds 128 pseudo-random words at once, so on this
+        // path the reference address of block `i + PREFETCH_DISTANCE` is
+        // already computable — while the block the C is about to stall on is
+        // still being loaded on demand. `opt.c` cannot do this: it generates
+        // the same 128 addresses and then consumes them strictly one per
+        // iteration, so it never has an address in hand before the block that
+        // needs it.
+        //
+        // Skipped in two cases, neither of which costs correctness:
+        //
+        // * `ahead >= segment_length` — past the end of this segment; the
+        //   addresses there belong to a later `fill_segment` call;
+        // * `slot_ahead <= slot` — `i + PREFETCH_DISTANCE` has crossed into the
+        //   next group of 128, whose `address_block` has not been generated
+        //   yet, so the word would be a stale one from the previous group.
+        //   This costs `PREFETCH_DISTANCE` unprefetched blocks per 128.
+        //
+        // The address is used **only** as a prefetch hint, which cannot fault
+        // and cannot change a bit of output — see [`prefetch_block`].
+        if data_independent_addressing {
+            let ahead = i.wrapping_add(PREFETCH_DISTANCE);
+            let slot_ahead = (ahead % ADDRESSES_IN_BLOCK_U32) as usize;
+            if ahead < instance.segment_length && slot_ahead > slot {
+                let off = ref_offset_for(instance, &position, ahead, address_block.0[slot_ahead]);
+                // SAFETY: `off` is in bounds for a well-formed instance by the
+                // same argument as `ref_offset`; and `prefetch_block` would be
+                // sound even if it were not.
+                unsafe { prefetch_block::<_MM_HINT_T0>(instance.block_ptr(off).cast_const()) };
+            }
         }
 
-        // 1.2.3 (opt.c:264-266) — `index_alpha` takes the LOW 32 bits.
-        position.index = i;
-        let ref_index = crate::core::index_alpha(
-            instance,
-            &position,
-            (pseudo_rand & 0xFFFF_FFFF) as u32,
-            ref_lane == position.lane,
-        );
-
-        // opt.c:269-271. Evaluated in `u64` because the C's `ref_lane` is a
-        // `uint64_t`; for a well-formed instance the sum is < memory_blocks.
-        let ref_offset_u64 =
-            u64::from(instance.lane_length) * u64::from(ref_lane) + u64::from(ref_index);
-        debug_assert!(ref_offset_u64 < instance.memory_len() as u64);
-        let ref_offset = ref_offset_u64 as u32;
+        // ⚠ MEASURED AND REJECTED: the *write* target is `curr_offset`, a plain
+        // running counter, so it can be prefetched on every path including
+        // Argon2d — `prefetch_block::<_MM_HINT_ET0>` a couple of blocks ahead,
+        // to take the line for ownership before the 16 stores need it. It buys
+        // nothing: Argon2d `m=262144 t=3` 281.2 -> 289.4 ms, Argon2i `t=1`
+        // 56.3 -> 56.2, Argon2id `t=1` 76.1 -> 75.1, each 5-6 alternating pairs
+        // and each mixed in direction. The sequential store stream is already
+        // handled — stores retire into the store buffer and the L2 streamer
+        // sees a perfectly linear address sequence, which is the one case the
+        // hardware prefetcher is good at. Only the *reference* read, which is
+        // random, needs help.
 
         // 2 Creating a new block (opt.c:272-281).
         //

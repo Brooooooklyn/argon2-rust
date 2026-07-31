@@ -405,12 +405,21 @@ pub unsafe fn fill_memory_blocks_traced(
     // why the `#[target_feature]` boundary sits on `fill_segment`.
     let fill = crate::fill_block::fill_segment_fn(backend);
 
+    // Multi-lane: hand the whole pass/slice/lane nest to the worker pool, which
+    // owns its threads for the entire fill instead of for one slice.
+    #[cfg(feature = "parallel")]
+    if instance.threads > 1 && instance.lanes > 1 {
+        // SAFETY: forwarded verbatim from this function's own contract.
+        unsafe { fill_pooled(instance, fill, trace) };
+        return Ok(());
+    }
+
     for pass in 0..instance.passes {
         for slice in 0..SYNC_POINTS {
             // SAFETY: `fill` is `fill_segment_fn(backend)`, and the caller
             // guarantees this CPU can execute `backend`; `instance` and the
             // absence of a concurrent filler are the caller's obligations too.
-            unsafe { fill_slice(instance, fill, pass, slice) };
+            unsafe { fill_slice_st(instance, fill, pass, slice) };
         }
 
         // genkat.c `internal_kat(instance, r)` — printed after each pass.
@@ -447,41 +456,6 @@ pub unsafe fn fill_memory_blocks_traced(
     }
 
     Ok(())
-}
-
-/// One `(pass, slice)` across every lane. Single-threaded build.
-///
-/// # Safety
-///
-/// As [`fill_memory_blocks_traced`]: this CPU must be able to execute whatever
-/// instruction set `fill` needs.
-#[cfg(not(feature = "parallel"))]
-#[inline]
-unsafe fn fill_slice(instance: &Instance, fill: FillSegmentFn, pass: u32, slice: u32) {
-    // SAFETY: forwarded verbatim from this function's own contract.
-    unsafe { fill_slice_st(instance, fill, pass, slice) };
-}
-
-/// One `(pass, slice)` across every lane, threaded when it pays.
-///
-/// `core.c:383` picks `fill_memory_blocks_st` vs `fill_memory_blocks_mt` from
-/// `instance->threads == 1`; the same test, one level further in.
-///
-/// # Safety
-///
-/// As [`fill_memory_blocks_traced`]: this CPU must be able to execute whatever
-/// instruction set `fill` needs.
-#[cfg(feature = "parallel")]
-#[inline]
-unsafe fn fill_slice(instance: &Instance, fill: FillSegmentFn, pass: u32, slice: u32) {
-    // SAFETY: forwarded verbatim from this function's own contract.
-    unsafe {
-        if instance.threads > 1 && instance.lanes > 1 {
-            fill_slice_mt(instance, fill, pass, slice);
-        } else {
-            fill_slice_st(instance, fill, pass, slice);
-        }
-    }
 }
 
 /// `fill_memory_blocks_st()`'s innermost loop (`core.c:265-268`).
@@ -556,7 +530,107 @@ struct SharedInstance<'a>(&'a Instance);
 #[cfg(feature = "parallel")]
 unsafe impl Send for SharedInstance<'_> {}
 
-/// Claim lanes from `next_lane` until the slice is done.
+/// The sync point, and the state the workers share across one whole fill.
+///
+/// # Why this exists instead of one `thread::scope` per slice
+///
+/// The four sync points per pass are algorithmic and cannot be weakened: every
+/// lane must finish slice `N` before any lane starts `N + 1`. What is *not*
+/// algorithmic is destroying and recreating the worker set at each of them,
+/// which is what `std::thread::scope` per slice did — `passes * 4 *
+/// (workers - 1)` thread creations for one hash, each a `clone()` plus a stack
+/// mapping. Measured on the target, four lanes over 4096-block segments:
+///
+/// ```text
+///   scope + 3 spawns, per slice        63.8 us
+///   live pool on std::sync::Barrier    20.7 us   (Mutex + Condvar: a syscall)
+///   live pool on this barrier           0.6 us
+/// ```
+///
+/// The threads now live for the whole fill and meet at a barrier instead. That
+/// is a 12-to-3 reduction in thread creations at `t = 1, p = 4`, and 48-to-3 at
+/// `t = 4`. The barrier is hand-rolled rather than `std::sync::Barrier` for the
+/// 20 us in that table: `Barrier` is a `Mutex` + `Condvar`, so every one of the
+/// `4 * passes` sync points is a pair of futex round trips.
+///
+/// # The barrier, and why the ordering is enough
+///
+/// Sense-reversing, with the *leader* — the thread that called into the hash —
+/// always doing the release. Every helper, having finished its lanes:
+///
+/// ```text
+///   arrived.fetch_add(1, Release)          publishes that helper's writes
+///   spin until generation != mine (Acquire)
+/// ```
+///
+/// and the leader, having finished its own lanes:
+///
+/// ```text
+///   spin until arrived == helpers (Acquire) acquires every helper's writes
+///   ... KAT trace here, if any: everyone is parked ...
+///   next_lane = 0; arrived = 0
+///   generation.fetch_add(1, Release)       publishes all of it to everyone
+/// ```
+///
+/// The transitivity is the point. A helper's block writes happen-before its
+/// `Release` on `arrived`; the leader's `Acquire` on `arrived` makes them
+/// happen-before everything it does next, which includes its `Release` on
+/// `generation`; and every *other* helper's `Acquire` on `generation` therefore
+/// sees them. So lane 0's slice-`N` writes are visible to lane 3 in slice
+/// `N + 1`, which is exactly the guarantee `thread::scope`'s join gave for free.
+///
+/// # Panics, and why `lost` exists
+///
+/// A spin barrier turns a worker that never arrives into a hang, and a hang is
+/// a far worse failure than a panic. `Bail`'s `Drop` marks a helper lost on the
+/// way out of an unwind; the leader stops waiting, sets `stop`, and returns, at
+/// which point `thread::scope` joins and re-raises the original panic. Nothing
+/// in `fill_segment` is supposed to panic — but "supposed to" is not a
+/// scheduling primitive.
+#[cfg(feature = "parallel")]
+struct FillSync {
+    /// Lanes handed out for the current slice. Reset by the leader.
+    next_lane: core::sync::atomic::AtomicU32,
+    /// Helpers that have finished the current slice.
+    arrived: core::sync::atomic::AtomicU32,
+    /// Bumped once per sync point; helpers wait for their own count to match.
+    generation: core::sync::atomic::AtomicU32,
+    /// Helpers that unwound out of the fill and will never arrive again.
+    lost: core::sync::atomic::AtomicU32,
+    /// Tells parked helpers to give up so the scope can join and propagate.
+    stop: core::sync::atomic::AtomicBool,
+    /// Helpers the OS actually gave us, which is what the leader waits for.
+    helpers: u32,
+}
+
+/// Iterations of `pause` before falling back to `yield_now`.
+///
+/// A segment is thousands of blocks, so an arriving worker is normally a few
+/// microseconds ahead of the last one and spinning wins outright. Past that the
+/// box is oversubscribed — 4 vCPU here is 2 physical cores plus SMT — and
+/// yielding the slot to the worker we are waiting for is strictly better than
+/// stealing issue bandwidth from its SMT sibling.
+#[cfg(feature = "parallel")]
+const SPIN_LIMIT: u32 = 1024;
+
+#[cfg(feature = "parallel")]
+impl FillSync {
+    /// Wait until `cond()` holds, spinning then yielding.
+    #[inline]
+    fn park_until(mut cond: impl FnMut() -> bool) {
+        let mut spins = 0u32;
+        while !cond() {
+            if spins < SPIN_LIMIT {
+                spins += 1;
+                core::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
+/// Fill every lane of one `(pass, slice)` this worker can claim.
 ///
 /// # Safety
 ///
@@ -565,7 +639,7 @@ unsafe impl Send for SharedInstance<'_> {}
 #[cfg(feature = "parallel")]
 unsafe fn drain_lanes(
     shared: SharedInstance<'_>,
-    next_lane: &core::sync::atomic::AtomicU32,
+    sync: &FillSync,
     fill: FillSegmentFn,
     pass: u32,
     slice: u32,
@@ -574,10 +648,9 @@ unsafe fn drain_lanes(
     use core::sync::atomic::Ordering;
 
     loop {
-        // Relaxed is enough: the counter only partitions work. The
-        // happens-before that the *data* needs comes from `thread::scope`
-        // joining every worker at the slice boundary.
-        let lane = next_lane.fetch_add(1, Ordering::Relaxed);
+        // Relaxed is enough: the counter only partitions work, and the
+        // happens-before the *data* needs comes from the barrier below.
+        let lane = sync.next_lane.fetch_add(1, Ordering::Relaxed);
         if lane >= lanes {
             return;
         }
@@ -589,58 +662,188 @@ unsafe fn drain_lanes(
     }
 }
 
-/// `fill_memory_blocks_mt()` for one `(pass, slice)` (`core.c:311-357`).
+/// The whole pass/slice/lane nest, on a worker pool that outlives every slice.
 ///
-/// The C spawns one thread per lane and caps concurrency by joining
-/// `thread[l - threads]` before creating thread `l`. This spawns exactly
-/// `min(threads, lanes)` workers that pull lanes off a shared counter, which
-/// keeps the same bound on live threads with the same work order guarantee
-/// (none — lanes within a slice are independent) and no per-lane thread
-/// creation. `threads` never affects the tag, only `lanes` does, so the two
-/// schedules produce identical output.
+/// Replaces `fill_memory_blocks_mt()` (`core.c:311-357`), which spawns one
+/// thread per lane *per slice* and caps concurrency by joining
+/// `thread[l - threads]` before creating thread `l`. This spawns
+/// `min(threads, lanes)` workers **once for the entire hash**; they pull lanes
+/// off a counter and meet at [`FillSync`]'s barrier at each of the `4 * passes`
+/// sync points. Same bound on live threads, same (absent) ordering requirement
+/// between lanes of one slice, same sync points — and `threads` never affects
+/// the tag, only `lanes` does, so the schedules are interchangeable.
 ///
 /// # Safety
 ///
 /// As [`fill_memory_blocks_traced`]: this CPU must be able to execute whatever
 /// instruction set `fill` needs.
 #[cfg(feature = "parallel")]
-unsafe fn fill_slice_mt(instance: &Instance, fill: FillSegmentFn, pass: u32, slice: u32) {
-    use core::sync::atomic::AtomicU32;
+unsafe fn fill_pooled(instance: &Instance, fill: FillSegmentFn, mut trace: Option<PassTrace<'_>>) {
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     let lanes = instance.lanes;
+    let passes = instance.passes;
     // `Instance::new` already clamps to `min(threads, lanes)`; re-clamp so a
     // hand-built `Instance` cannot ask for more workers than there are lanes.
-    let workers = if instance.threads < lanes {
-        instance.threads
-    } else {
-        lanes
-    };
+    let workers = instance.threads.min(lanes);
 
     let shared = SharedInstance(instance);
-    let next_lane = AtomicU32::new(0);
-    let counter = &next_lane;
+    let sync = FillSync {
+        next_lane: AtomicU32::new(0),
+        arrived: AtomicU32::new(0),
+        generation: AtomicU32::new(0),
+        lost: AtomicU32::new(0),
+        stop: AtomicBool::new(false),
+        // Optimistic: the shortfall from any thread the OS refuses is charged
+        // to `lost` right after the spawn loop, which the leader's wait
+        // condition already accounts for.
+        helpers: workers.saturating_sub(1),
+    };
+    let sync = &sync;
 
     std::thread::scope(|scope| {
-        // `workers - 1` helpers; the current thread is the last worker, so a
-        // `threads == lanes == 1` instance would spawn nothing (and never gets
-        // here anyway, `fill_slice` sends it to `fill_slice_st`).
+        /// Releases every parked helper when the leader leaves the scope,
+        /// however it leaves.
+        ///
+        /// Without this the crate deadlocks on any leader unwind — a panicking
+        /// KAT trace callback is enough to reach it. The helpers would be
+        /// spinning inside `park_until` for a `generation` bump that is never
+        /// coming, and `Scope`'s own `Drop` would block for ever trying to join
+        /// them. `thread::scope` propagating a panic is only useful if the
+        /// threads it is joining can still finish.
+        ///
+        /// Firing on the normal path too is harmless and is why this is a guard
+        /// rather than a `catch_unwind`: by then every helper has completed its
+        /// last slice and is on its way out, so `stop` only shortens a wait
+        /// whose answer has already been decided.
+        struct ReleaseHelpers<'a>(&'a FillSync);
+        impl Drop for ReleaseHelpers<'_> {
+            fn drop(&mut self) {
+                self.0.stop.store(true, Ordering::Relaxed);
+                self.0.generation.fetch_add(1, Ordering::Release);
+            }
+        }
+        let _release = ReleaseHelpers(sync);
+
+        let mut spawned = 0u32;
+
         for _ in 1..workers {
             // `Builder::spawn_scoped` returns an error where `scope.spawn`
-            // would panic, and this crate must not panic. If the OS refuses a
-            // thread we simply run with fewer workers: every lane is still
-            // claimed from `next_lane` by whichever workers do exist, and the
-            // tag does not depend on the thread count.
-            let _ = std::thread::Builder::new().spawn_scoped(scope, move || {
-                // SAFETY: forwarded from this function's contract — the caller
-                // guarantees the CPU can execute `fill`. The cross-thread half
-                // is the `unsafe impl Send for SharedInstance` argument above.
-                unsafe { drain_lanes(shared, counter, fill, pass, slice, lanes) };
+            // would panic, and this crate must not panic. A refused thread just
+            // means fewer workers: every lane is still claimed from `next_lane`
+            // by whoever does exist, and the tag does not depend on the count.
+            let handle = std::thread::Builder::new().spawn_scoped(scope, move || {
+                // Marks this helper lost if it unwinds, so the leader stops
+                // waiting for a barrier arrival that will never come.
+                struct Bail<'a>(&'a AtomicU32, bool);
+                impl Drop for Bail<'_> {
+                    fn drop(&mut self) {
+                        if self.1 {
+                            self.0.fetch_add(1, Ordering::Release);
+                        }
+                    }
+                }
+                let mut bail = Bail(&sync.lost, true);
+
+                let mut generation = 0u32;
+                'outer: for pass in 0..passes {
+                    for slice in 0..SYNC_POINTS {
+                        // SAFETY: forwarded from this function's contract — the
+                        // caller guarantees the CPU can execute `fill`. The
+                        // cross-thread half is the `unsafe impl Send for
+                        // SharedInstance` argument above.
+                        unsafe { drain_lanes(shared, sync, fill, pass, slice, lanes) };
+
+                        // Release: publishes this helper's block writes to the
+                        // leader's acquire below.
+                        sync.arrived.fetch_add(1, Ordering::Release);
+                        generation += 1;
+                        FillSync::park_until(|| {
+                            sync.generation.load(Ordering::Acquire) == generation
+                                || sync.stop.load(Ordering::Relaxed)
+                        });
+                        if sync.stop.load(Ordering::Relaxed) {
+                            break 'outer;
+                        }
+                    }
+                }
+                bail.1 = false;
             });
+            if handle.is_ok() {
+                spawned += 1;
+            }
         }
-        // SAFETY: as in the spawned workers; this thread is just the last one.
-        unsafe { drain_lanes(shared, counter, fill, pass, slice, lanes) };
+
+        // A thread the OS refused must not be waited for. `helpers` was set
+        // optimistically; charge the shortfall to `lost`, which the leader's
+        // wait condition already accounts for.
+        sync.lost
+            .fetch_add(sync.helpers - spawned, Ordering::Relaxed);
+
+        let mut generation = 0u32;
+        'outer: for pass in 0..passes {
+            for slice in 0..SYNC_POINTS {
+                // SAFETY: as in the spawned workers; the leader is just one
+                // more of them.
+                unsafe { drain_lanes(shared, sync, fill, pass, slice, lanes) };
+
+                // Acquire: makes every helper's slice writes visible here, and
+                // therefore — through the release on `generation` below — to
+                // every other helper in the next slice.
+                FillSync::park_until(|| {
+                    sync.arrived.load(Ordering::Acquire) + sync.lost.load(Ordering::Acquire)
+                        >= sync.helpers
+                });
+                if sync.lost.load(Ordering::Relaxed) > sync.helpers - spawned {
+                    // A helper unwound. Stop cleanly so `thread::scope` can
+                    // join it and re-raise the panic, rather than spinning for
+                    // ever on an arrival that is never coming.
+                    sync.stop.store(true, Ordering::Relaxed);
+                    sync.generation.fetch_add(1, Ordering::Release);
+                    break 'outer;
+                }
+
+                // genkat.c `internal_kat(instance, r)`, printed after each
+                // pass. This is the one place it can go: every helper is parked
+                // on `generation`, holding no reference into the arena, and
+                // none of them can move until the release below.
+                if slice == SYNC_POINTS - 1
+                    && let Some(callback) = trace.as_mut()
+                {
+                    // SAFETY: three obligations, and none of them is "the arena
+                    // is zero".
+                    //
+                    //  1. Valid for `memory_len()` `Block`s: that is
+                    //     `Instance::new`'s own contract, discharged by whoever
+                    //     built `instance`.
+                    //  2. Every block is *initialised*, which is what makes a
+                    //     `&[Block]` over them a valid reference. `Arena`
+                    //     guarantees that for its whole capacity from birth —
+                    //     `alloc_zeroed`, or a kernel-zeroed `MAP_ANONYMOUS`
+                    //     mapping — and never gives it up.
+                    //  3. No live `&mut Block`: every helper has arrived at the
+                    //     barrier for the last slice of this pass and is parked
+                    //     inside `park_until`, so every `&mut Block` any of
+                    //     them formed is dead. This shared slice is the only
+                    //     live reference into the arena.
+                    let blocks = unsafe {
+                        core::slice::from_raw_parts(
+                            instance.memory_ptr().cast_const(),
+                            instance.memory_len(),
+                        )
+                    };
+                    callback(pass, blocks);
+                }
+
+                sync.next_lane.store(0, Ordering::Relaxed);
+                sync.arrived.store(0, Ordering::Relaxed);
+                generation += 1;
+                // Release: hands every helper everything acquired above.
+                sync.generation.store(generation, Ordering::Release);
+            }
+        }
     });
-    // Leaving the scope joins every worker: this is the sync point.
+    // Leaving the scope joins every worker, and re-raises a helper's panic.
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,33 +1237,34 @@ impl Argon2 {
 ///
 /// # What it is worth, measured
 ///
-/// Reuse removes **one memset per hash** and nothing else. Interleaved A/B
-/// against [`Argon2::hash_into`], min of 3 runs on an Apple M5 Max (NEON,
-/// `--release`, competing load throughout, so read these as lower bounds):
+/// Reuse skips the `mmap`, the first-touch page faults over the whole arena,
+/// and the `munmap`. Interleaved A/B against [`Argon2::hash_into`], 15 paired
+/// rounds on Linux/x86-64 (Sapphire Rapids, AVX-512):
 ///
 /// ```text
-///   m_cost   t   p |  one-shot |     reuse |  delta
+///   m_cost   t   p |  one-shot |    pooled |  delta
 ///  ---------|-----|-----------|-----------|--------
-///   256 KiB   1   1 |   46.7 us |   45.5 us |  -2.4%
-///     4 MiB   1   1 |  636.6 us |  619.5 us |  -2.7%
-///     4 MiB   1   4 |  375.8 us |  358.1 us |  -4.7%
-///     4 MiB   3   1 |   1.81 ms |   1.80 ms |  -0.5%
-///    64 MiB   1   4 |   4.91 ms |   4.78 ms |  -2.5%
-///   256 MiB   1   1 |  64.55 ms |  62.82 ms |  -2.7%
-///   256 MiB   1   4 |  21.87 ms |  20.95 ms |  -4.2%
+///     8 KiB   1   1 |  20.4 us |   20.3 us |  -0.7%
+///    64 KiB   1   1 |  27.9 us |   26.5 us |  -5.3%
+///     1 MiB   1   1 |  212 us  |   185 us  | -11.7%
+///     4 MiB   1   1 |  989 us  |   786 us  | -19.9%
+///     4 MiB   1   4 |  806 us  |   592 us  | -26.9%
+///    64 MiB   1   1 |  25.89 ms|  19.43 ms | -24.9%
+///    64 MiB   1   4 |  11.65 ms|   8.40 ms | -34.0%
+///   256 MiB   1   1 | 111.74 ms|  86.17 ms | -23.3%
+///   256 MiB   1   4 |  46.14 ms|  35.09 ms | -24.0%
+///   256 MiB   3   4 | 109.85 ms|  99.26 ms |  -9.7%
 /// ```
 ///
-/// So: roughly **2-3% at `lanes = 1`**, **4-5% at `lanes = 4`**, and about half
-/// a percent at `t_cost = 3`, where the same one saved memset is spread over
-/// three passes of filling. Below `m_cost = 1 MiB` a hash is mostly BLAKE2b and
-/// there is little to win.
+/// The `t = 3` rows are smaller for the obvious reason: the same one-time
+/// acquisition is spread over three passes of filling.
 ///
-/// It does **not** remove allocator calls: there was only ever one per hash, and
-/// at `m_cost = 1 GiB` it is 1.7 us out of 306 ms, six thousandths of one
-/// percent. It does **not** remove page faults: a steady-state process has none,
-/// because `libmalloc` never returns the arena's pages. It does **not** remove
-/// the security wipe. If you need a bigger number than that, this is not where
-/// it is.
+/// It does **not** remove allocator calls — there was only ever one per hash,
+/// 1.7 us out of 306 ms at `m_cost = 1 GiB`. The table this replaces said reuse
+/// was worth "2-3%, one memset"; that was measured on macOS, where `libmalloc`
+/// keeps the arena's pages and a steady-state process faults zero times per
+/// hash. On Linux every one-shot hash faults the entire arena, and that is what
+/// the numbers above are.
 ///
 /// # Why the small buffers are still `Vec`s
 ///
@@ -1633,6 +1837,12 @@ unsafe fn hash_in_arena(
     if arena.len() != memory_blocks as usize {
         return Err(Error::MemoryAllocationError);
     }
+
+    // The release wipe may use as many threads as the caller sanctioned. It
+    // cannot affect the tag, so `threads()` — the OS-thread budget — is the
+    // right number here rather than `effective_threads()`, which is
+    // `min(threads, lanes)` and describes the *algorithmic* parallelism.
+    arena.set_workers(params.threads());
 
     // core.c:631 "2. Initial hashing". The 8 bytes after `H0` are already zero,
     // which is what core.c:633 achieves with `clear_internal_memory`.
@@ -2322,6 +2532,65 @@ mod tests {
 
         assert_eq!(passes, alloc::vec![(0, 256), (1, 256), (2, 256)]);
         assert_eq!(h0.len(), PREHASH_DIGEST_LENGTH);
+    }
+
+    /// A panic on the leader must propagate, not deadlock the pool.
+    ///
+    /// The worker pool spans the whole fill and its helpers park on a spin
+    /// barrier between slices. If the leader unwinds out of `thread::scope`
+    /// without releasing them, `Scope`'s `Drop` blocks for ever joining threads
+    /// that are waiting for a `generation` bump that is never coming — the
+    /// crate hangs instead of failing. This test reaches that path through the
+    /// one leader-side callback that exists, and it is the reason
+    /// `ReleaseHelpers` is a `Drop` guard rather than a line at the end of the
+    /// loop.
+    ///
+    /// If this regresses, it does not fail — it hangs. That is the point.
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn a_panicking_trace_callback_unwinds_instead_of_deadlocking_the_pool() {
+        // 4 lanes and 4 threads, so there really are helpers parked on the
+        // barrier when the callback runs.
+        let params = Params::new(64, 2, 4, 32).expect("params");
+        let mut arena = Arena::new(params.memory_blocks() as usize).expect("arena");
+        let mut blockhash = initial_hash(
+            Algorithm::Argon2id,
+            Version::V0x13,
+            &params,
+            b"password",
+            b"somesaltsomesalt",
+            &[],
+            &[],
+        )
+        .expect("H0");
+        let (_, _, lane_length) = params.memory_layout();
+        fill_first_blocks(
+            &mut blockhash,
+            arena.as_mut_slice(),
+            params.lanes(),
+            lane_length,
+        )
+        .expect("first blocks");
+
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // SAFETY: `arena` was sized from `params` and outlives `instance`.
+            let instance = unsafe {
+                Instance::new(
+                    arena.as_mut_ptr(),
+                    arena.len(),
+                    Algorithm::Argon2id,
+                    Version::V0x13,
+                    &params,
+                )
+            };
+            let mut boom = |_pass: u32, _blocks: &[Block]| panic!("trace exploded");
+            // SAFETY: `Backend::Scalar` runs anywhere, and `instance` is valid.
+            unsafe {
+                fill_memory_blocks_traced(&instance, Backend::Scalar, Some(&mut boom)).expect("fill")
+            };
+        }));
+
+        assert!(caught.is_err(), "the callback's panic must reach the caller");
     }
 
     #[test]

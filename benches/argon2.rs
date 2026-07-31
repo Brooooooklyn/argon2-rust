@@ -301,6 +301,11 @@ use criterion::{BenchmarkGroup, BenchmarkId, Criterion, SamplingMode, Throughput
 use argon2_rust::__internal::{Backend, fill_segment_fn, hash_with_backend};
 use argon2_rust::{Algorithm, Argon2, Params, Version};
 
+/// Reads the ISA out of the compiled C library instead of assuming one. Shared
+/// verbatim with `benches/micro.rs`; see that file for the invocation.
+#[path = "support/cref_isa.rs"]
+mod cref_isa;
+
 // ---------------------------------------------------------------------------
 // Fixed inputs
 // ---------------------------------------------------------------------------
@@ -653,12 +658,34 @@ mod cref {
         assert_eq!(rc, 0, "C argon2_hash failed with code {rc}");
     }
 
-    /// Just for the header line.
+    /// The header line, describing the library that is **actually loaded**.
+    ///
+    /// This used to be the constant string `"(src/ref.c, scalar, -O3)"`. That
+    /// was a lie whenever the tree had been rebuilt with `make OPTTARGET=...`,
+    /// and it lied at the worst possible moment: it printed "scalar" beside
+    /// timings taken against an AVX-512 `src/opt.c`, and a conclusion was drawn
+    /// from the resulting mismatched comparison. Nothing here is assumed now —
+    /// [`crate::cref_isa::probe`] reads the `fill_block` bytes out of the
+    /// binary and reports the encoding markers it finds alongside the label, so
+    /// the classification can be checked rather than trusted.
     pub fn describe() -> String {
         library_path().map_or_else(
             || "not built".to_string(),
-            |p| format!("{p} (src/ref.c, scalar, -O3)"),
+            |p| {
+                super::cref_isa::probe(p).map_or_else(
+                    || format!("{p} (ISA probe failed: could not read the file)"),
+                    |isa| isa.describe(),
+                )
+            },
         )
+    }
+
+    /// Just the ISA word (`scalar` when the probe found nothing vector-shaped),
+    /// for the footnote under the ratio table.
+    pub fn isa_word() -> String {
+        library_path()
+            .and_then(super::cref_isa::probe)
+            .map_or_else(|| "unknown".to_string(), |i| i.isa().to_string())
     }
 }
 
@@ -1769,11 +1796,29 @@ fn ratio_summary() {
             ),
         }
     }
+    // The footnote has to name the ISA the loaded library was really built at,
+    // for the same reason `cref::describe` does: a Rust backend timed against a
+    // C built at a different ISA is not a measurement of anything, and the only
+    // defence is to print the truth next to the numbers.
+    let c_isa = cref::isa_word();
     println!(
-        "\nNOTE: c_ref is phc-winner-argon2 built from src/ref.c (SCALAR) at -O3.\n\
-         src/opt.c is x86-only, so there is no C SIMD build on this arm64 host.\n\
-         The like-for-like row is scalar vs c_ref. c_ref/simd is Rust-SIMD vs\n\
-         C-scalar, which is NOT a SIMD-to-SIMD comparison."
+        "\nNOTE: c_ref is the library described above — ISA `{c_isa}`, NOT assumed.\n\
+         A row is like-for-like only when the Rust backend and `{c_isa}` are the\n\
+         same instruction set. `{}` vs `{c_isa}` is {}.\n\
+         Rebuild the C at a matched level before quoting a ratio:\n\
+         `make -C phc-winner-argon2 clean && make -C phc-winner-argon2 OPTTARGET=... libs`\n\
+         (none = ref.c, x86-64 = SSE2, 'x86-64 -mssse3', 'x86-64 -mavx2', native = AVX-512).\n\
+         CAUTION: with OPTTARGET=none the Makefile adds no -march at all, so ref.c is\n\
+         compiled at this compiler's DEFAULT -march. If that default is above the\n\
+         x86-64 baseline (Ubuntu's gcc 15 defaults to x86-64-v3, i.e. AVX2), the\n\
+         result is an auto-vectorised ref.c and NOT a scalar build. The probe line\n\
+         above reports what actually landed; believe it, not the OPTTARGET you typed.",
+        detected.name(),
+        if detected.name() == c_isa {
+            "matched"
+        } else {
+            "NOT a like-for-like comparison"
+        }
     );
 }
 

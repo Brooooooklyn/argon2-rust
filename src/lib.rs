@@ -46,9 +46,11 @@
 //! # Features
 //!
 //! * `std` *(default)* — runtime CPU feature detection.
-//! * `parallel` *(default, implies `std`)* — multi-threaded fill via
-//!   [`std::thread::scope`]. Note that the thread count does **not** change the
-//!   tag; only [`Params::lanes`] does.
+//! * `parallel` *(default, implies `std`)* — multi-threaded fill. One
+//!   [`std::thread::scope`] for the **whole** fill, whose workers meet at a
+//!   barrier at each of the `4 * t_cost` algorithmic sync points, rather than a
+//!   fresh scope per sync point. Note that the thread count does **not** change
+//!   the tag; only [`Params::lanes`] does.
 //! * `zeroize-memory` *(default)* — securely wipe internal buffers, the
 //!   equivalent of `FLAG_clear_internal_memory` in the C.
 //! * `bump-alloc` — adds `bumpalo` and gives `memory::Workspace` a reusable
@@ -64,14 +66,30 @@
 //!
 //! # Reusing memory across hashes
 //!
-//! Each [`Argon2`] hash allocates its block arena once and frees it on the way
-//! out. A process that hashes repeatedly can instead keep a [`Hasher`], from
-//! [`Argon2::hasher`], which parks the arena between calls and wipes it on
-//! release so the next call gets a zeroed arena without a second memset. That
-//! is worth 1.4-2.4% at `lanes = 1` and 3.0-5.1% at `lanes = 4`. It does not
-//! remove allocator calls — there is only ever one, at 0.0006% of a 1 GiB
-//! hash — and it does not remove page faults, of which a steady-state process
-//! has none.
+//! Each [`Argon2`] hash acquires its block arena once and releases it on the
+//! way out. A process that hashes repeatedly can instead keep a [`Hasher`],
+//! from [`Argon2::hasher`], which parks the arena between calls and wipes it on
+//! release, so the next call gets a zeroed arena that is **already mapped and
+//! already resident**.
+//!
+//! That is worth far more than it used to be. Measured on Linux/x86-64,
+//! interleaved against the one-shot API, 15 paired rounds:
+//!
+//! ```text
+//!    m_cost   t   p |  one-shot |    pooled |  delta
+//!   ---------|-----|-----------|-----------|--------
+//!      1 MiB   1   1 |   212 us |    185 us | -11.7%
+//!      4 MiB   1   4 |   806 us |    592 us | -26.9%
+//!     64 MiB   1   1 |  25.89 ms|  19.43 ms | -24.9%
+//!     64 MiB   1   4 |  11.65 ms|   8.40 ms | -34.0%
+//!    256 MiB   1   1 | 111.74 ms|  86.17 ms | -23.3%
+//!    256 MiB   1   4 |  46.14 ms|  35.09 ms | -24.0%
+//! ```
+//!
+//! What reuse skips is the `mmap`, the first-touch page faults over the whole
+//! arena, and the `munmap` — not "an allocator call", of which there was only
+//! ever one and it never mattered. Below about 1 MiB a hash is mostly BLAKE2b
+//! and there is little to win (-0.7% at `m_cost = 8 KiB`).
 //!
 //! ```
 //! use argon2_rust::{Algorithm, Argon2, Hasher, Params, Version};
@@ -202,6 +220,10 @@ pub mod __internal {
         clear_internal_memory_blocks, clear_internal_memory_u64, secure_wipe, secure_wipe_blocks,
         secure_wipe_raw, secure_wipe_u64,
     };
+    /// The arena release-path observation point, for
+    /// `tests/allocation_audit.rs`. See [`crate::memory::audit`].
+    #[cfg(feature = "std")]
+    pub use crate::memory::audit;
     pub use crate::params::validate_inputs;
 
     /// `bumpalo`, re-exported so callers can name the types
