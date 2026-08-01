@@ -1053,18 +1053,18 @@ fn bench_vs_c(c: &mut Criterion) {
 ///   roughly halves the share at `t = 3`. This is the *worst* case, and leaving
 ///   it out would be picking the flattering configuration.
 const REUSE_GRID: &[(u32, u32, u32)] = &[
-    (8, 1, 1),        // ARGON2_MIN_MEMORY: the smallest hash that exists
-    (64, 1, 1),       // 64 KiB
-    (1024, 1, 1),     // 1 MiB
-    (4096, 1, 1),     // 4 MiB
-    (4096, 3, 1),     // t_cost dilutes it
-    (4096, 1, 4),     // lanes concentrate it
-    (65536, 1, 1),    // RFC 9106 second recommendation
-    (65536, 1, 4),    //   ... with 4 lanes
-    (65536, 3, 4),    //   ... and 3 passes
-    (262144, 1, 1),   // 256 MiB
-    (262144, 1, 4),   //   ... with 4 lanes
-    (262144, 3, 4),   //   ... and 3 passes
+    (8, 1, 1),      // ARGON2_MIN_MEMORY: the smallest hash that exists
+    (64, 1, 1),     // 64 KiB
+    (1024, 1, 1),   // 1 MiB
+    (4096, 1, 1),   // 4 MiB
+    (4096, 3, 1),   // t_cost dilutes it
+    (4096, 1, 4),   // lanes concentrate it
+    (65536, 1, 1),  // RFC 9106 second recommendation
+    (65536, 1, 4),  //   ... with 4 lanes
+    (65536, 3, 4),  //   ... and 3 passes
+    (262144, 1, 1), // 256 MiB
+    (262144, 1, 4), //   ... with 4 lanes
+    (262144, 3, 4), //   ... and 3 passes
 ];
 
 /// `REUSE_GRID`, plus the 1 GiB rows when `ARGON2_BENCH_REUSE_BIG` is set.
@@ -1082,7 +1082,11 @@ fn reuse_grid() -> Vec<(u32, u32, u32)> {
         grid.push((1_048_576, 1, 4));
     }
     if let Ok(spec) = std::env::var("ARGON2_BENCH_REUSE_ONLY") {
-        let wanted: Vec<&str> = spec.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        let wanted: Vec<&str> = spec
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
         grid.retain(|&(m, t, p)| {
             let label = format!("m{m}_t{t}_p{p}");
             wanted.iter().any(|w| label.contains(w))

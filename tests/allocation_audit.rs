@@ -336,12 +336,21 @@ fn every_arena_path_yields_64_byte_aligned_blocks() {
     }
 
     let mut ws = Workspace::with_capacity(base).expect("workspace");
-    check("with_capacity + acquire", &ws.acquire(base).expect("acquire"));
+    check(
+        "with_capacity + acquire",
+        &ws.acquire(base).expect("acquire"),
+    );
     // Retarget down: same allocation, a smaller visible window.
     check("retargeted smaller", &ws.acquire(3).expect("acquire 3"));
-    check("retargeted smaller (odd)", &ws.acquire(17).expect("acquire 17"));
+    check(
+        "retargeted smaller (odd)",
+        &ws.acquire(17).expect("acquire 17"),
+    );
     // Back up to full, still the same allocation.
-    check("retargeted back up", &ws.acquire(base).expect("acquire base"));
+    check(
+        "retargeted back up",
+        &ws.acquire(base).expect("acquire base"),
+    );
     // Growth: a fresh allocation behind the same workspace.
     check("grown", &ws.acquire(grown).expect("grow"));
     // And after a release/re-acquire round trip.
@@ -390,7 +399,11 @@ fn the_bump_honours_64_byte_alignment_when_asked() {
 fn acquire_owned_twice_yields_two_distinct_live_allocations() {
     let mut ws = Workspace::with_capacity(32).expect("workspace");
     let a = ws.acquire_owned(32).expect("first");
-    assert_eq!(ws.capacity(), 0, "nothing may stay parked while it is on loan");
+    assert_eq!(
+        ws.capacity(),
+        0,
+        "nothing may stay parked while it is on loan"
+    );
     let b = ws.acquire_owned(32).expect("second");
 
     assert_ne!(
@@ -642,7 +655,10 @@ fn the_unwind_test_pattern_really_reaches_the_arena() {
             block.fill(0xDE);
         }
         assert!(
-            guard.as_slice().iter().all(|b| b.0[0] == u64::from_ne_bytes([0xDE; 8])),
+            guard
+                .as_slice()
+                .iter()
+                .all(|b| b.0[0] == u64::from_ne_bytes([0xDE; 8])),
             "the pattern did not land"
         );
     }
@@ -669,7 +685,9 @@ fn hundreds_of_pooled_hashes_do_not_allocate() {
 
     // Warm up: the first hash allocates the arena, and every later one must not.
     for _ in 0..4 {
-        hasher.hash_into(b"password", b"somesalt", &mut tag).expect("warm");
+        hasher
+            .hash_into(b"password", b"somesalt", &mut tag)
+            .expect("warm");
     }
     let before = live();
 
@@ -705,7 +723,9 @@ fn alternating_costs_settle_on_one_arena() {
     for _ in 0..4 {
         for params in [small, large] {
             hasher.set_argon2(Argon2::new(Algorithm::Argon2id, Version::V0x13, params));
-            hasher.hash_into(b"password", b"somesalt", &mut tag).expect("warm");
+            hasher
+                .hash_into(b"password", b"somesalt", &mut tag)
+                .expect("warm");
         }
     }
     let before = live();
@@ -715,7 +735,9 @@ fn alternating_costs_settle_on_one_arena() {
     for _ in 0..rounds {
         for params in [small, large] {
             hasher.set_argon2(Argon2::new(Algorithm::Argon2id, Version::V0x13, params));
-            hasher.hash_into(b"password", b"somesalt", &mut tag).expect("hash");
+            hasher
+                .hash_into(b"password", b"somesalt", &mut tag)
+                .expect("hash");
         }
     }
     assert_eq!(
@@ -788,7 +810,9 @@ fn growth_frees_the_old_arena_before_it_allocates_the_new_one() {
     drop(armed);
 
     assert_eq!(ws.capacity(), 1026);
-    assert!(is_all_zero(ws.acquire(1026).expect("acquire grown").as_slice()));
+    assert!(is_all_zero(
+        ws.acquire(1026).expect("acquire grown").as_slice()
+    ));
 }
 
 /// The other free the reuse layer performs: `release` keeps the larger of the
@@ -829,14 +853,22 @@ fn growing_a_hasher_frees_its_old_arena_wiped() {
     let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, small).hasher();
 
     let mut tag = [0u8; 32];
-    hasher.hash_into(b"password", b"somesalt", &mut tag).expect("small hash");
+    hasher
+        .hash_into(b"password", b"somesalt", &mut tag)
+        .expect("small hash");
     assert_eq!(hasher.reserved_blocks(), small.memory_blocks() as usize);
 
     let armed = Armed::on(small.memory_blocks() as usize);
     hasher.set_argon2(Argon2::new(Algorithm::Argon2id, Version::V0x13, large));
-    hasher.hash_into(b"password", b"somesalt", &mut tag).expect("large hash");
+    hasher
+        .hash_into(b"password", b"somesalt", &mut tag)
+        .expect("large hash");
 
-    assert_eq!(armed.released(), 1, "the small arena was leaked when the hasher grew");
+    assert_eq!(
+        armed.released(),
+        1,
+        "the small arena was leaked when the hasher grew"
+    );
     if WIPES {
         assert_eq!(
             armed.released_dirty(),
@@ -856,7 +888,10 @@ fn reset_bump_reclaims_and_the_absence_of_a_reset_does_not() {
     let mut ws = Workspace::new();
     for _ in 0..64 {
         for len in [98usize, 51, 33] {
-            let _ = ws.bump().try_alloc_slice_fill_copy(len, 0u8).expect("scratch");
+            let _ = ws
+                .bump()
+                .try_alloc_slice_fill_copy(len, 0u8)
+                .expect("scratch");
         }
         ws.reset_bump();
     }
@@ -871,7 +906,10 @@ fn reset_bump_reclaims_and_the_absence_of_a_reset_does_not() {
     let mut ws = Workspace::new();
     for _ in 0..64 {
         for len in [98usize, 51, 33] {
-            let _ = ws.bump().try_alloc_slice_fill_copy(len, 0u8).expect("scratch");
+            let _ = ws
+                .bump()
+                .try_alloc_slice_fill_copy(len, 0u8)
+                .expect("scratch");
         }
     }
     let without_reset = ws.bump_reserved_bytes();
@@ -961,7 +999,9 @@ fn verify_encoded_cannot_let_the_input_string_set_the_high_water_mark() {
 
     let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, small).hasher();
     let mut tag = [0u8; 32];
-    hasher.hash_into(b"password", b"somesalt", &mut tag).expect("hash");
+    hasher
+        .hash_into(b"password", b"somesalt", &mut tag)
+        .expect("hash");
     assert_eq!(hasher.reserved_blocks(), small.memory_blocks() as usize);
 
     // The verify itself must still succeed — the string is valid and the
@@ -1005,7 +1045,9 @@ fn verify_encoded_cannot_let_the_input_string_set_the_high_water_mark() {
     // Repeating it does not ratchet, and the pooled path still works after.
     for _ in 0..4 {
         let _ = hasher.verify_encoded(&encoded_large, b"password", Algorithm::Argon2id);
-        hasher.hash_into(b"password", b"somesalt", &mut tag).expect("hash");
+        hasher
+            .hash_into(b"password", b"somesalt", &mut tag)
+            .expect("hash");
     }
     assert_eq!(hasher.reserved_blocks(), small.memory_blocks() as usize);
     assert_eq!(live(), balance);
@@ -1096,11 +1138,15 @@ fn a_hash_on_a_deliberately_dirty_arena_still_matches() {
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
     let mut want = [0u8; 32];
-    argon2.hash_into(b"password", b"somesalt", &mut want).expect("reference");
+    argon2
+        .hash_into(b"password", b"somesalt", &mut want)
+        .expect("reference");
 
     let mut hasher = argon2.hasher();
     let mut got = [0u8; 32];
-    hasher.hash_into(b"password", b"somesalt", &mut got).expect("warm up");
+    hasher
+        .hash_into(b"password", b"somesalt", &mut got)
+        .expect("warm up");
     assert_eq!(got, want);
 
     // There is no public hook into the hasher's workspace, so verify the same
@@ -1133,7 +1179,9 @@ fn a_hash_on_a_deliberately_dirty_arena_still_matches() {
 
     // And the pooled API keeps agreeing after all of that.
     for _ in 0..4 {
-        hasher.hash_into(b"password", b"somesalt", &mut got).expect("pooled");
+        hasher
+            .hash_into(b"password", b"somesalt", &mut got)
+            .expect("pooled");
         assert_eq!(got, want);
     }
 }

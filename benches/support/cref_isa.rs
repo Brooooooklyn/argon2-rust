@@ -175,11 +175,7 @@ fn u64le(b: &[u8], at: usize) -> Option<u64> {
 
 /// `EM_X86_64`. Anything else and the encoding counts are meaningless.
 fn is_elf64_x86_64(b: &[u8]) -> bool {
-    b.len() > 0x14
-        && &b[..4] == b"\x7fELF"
-        && b[4] == 2
-        && b[5] == 1
-        && u16le(b, 0x12) == Some(62)
+    b.len() > 0x14 && &b[..4] == b"\x7fELF" && b[4] == 2 && b[5] == 1 && u16le(b, 0x12) == Some(62)
 }
 
 /// File offset and length of the `fill_block` symbol's bytes.

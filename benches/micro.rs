@@ -219,9 +219,9 @@ fn parse_args() -> Args {
                     "decompose" => Mode::Decompose,
                     "stages" => Mode::Stages,
                     "memory" => Mode::Memory,
-                    other => panic!(
-                        "unknown mode `{other}` (fill|hash|seg|decompose|stages|memory)"
-                    ),
+                    other => {
+                        panic!("unknown mode `{other}` (fill|hash|seg|decompose|stages|memory)")
+                    }
                 }
             }
             "-a" | "--alg" => {
@@ -245,7 +245,10 @@ fn parse_args() -> Args {
             // enumerates them. Neither is a measurement, so neither should pay
             // for one -- exit clean, exactly as criterion does.
             "--test" | "--list" => {
-                println!("micro: --{} is a probe, not a measurement; nothing to run", &arg[2..]);
+                println!(
+                    "micro: --{} is a probe, not a measurement; nothing to run",
+                    &arg[2..]
+                );
                 std::process::exit(0);
             }
             other => panic!("unknown flag `{other}` (try --help)"),
@@ -380,7 +383,15 @@ impl Bed {
         // (it is a field of `self`, and the `Instance` never escapes the
         // caller's stack frame). Re-deriving the pointer here, after the
         // `&mut [Block]` above has been dropped, keeps the provenance clean.
-        unsafe { Instance::new(self.arena.as_mut_ptr(), n, self.alg, Version::V0x13, &self.params) }
+        unsafe {
+            Instance::new(
+                self.arena.as_mut_ptr(),
+                n,
+                self.alg,
+                Version::V0x13,
+                &self.params,
+            )
+        }
     }
 }
 
@@ -475,9 +486,7 @@ fn time_segments(
                 ns_per_block: Vec::with_capacity(reps),
                 blocks: lanes * (seg_len - u64::from(first) * 2),
                 data_independent: matches!(alg, Algorithm::Argon2i)
-                    || (matches!(alg, Algorithm::Argon2id)
-                        && pass == 0
-                        && slice < SYNC_POINTS / 2),
+                    || (matches!(alg, Algorithm::Argon2id) && pass == 0 && slice < SYNC_POINTS / 2),
             });
         }
     }
@@ -565,7 +574,10 @@ fn run_decompose(a: &Args) {
         "  m={} p={} threads={} {:?}, backend {}",
         a.m_cost, a.lanes, threads, a.alg, a.backend
     );
-    println!("  {:>3} {:>12} {:>9} {:>12} {:>9}", "t", "ours_ms", "spread", "c_ms", "spread");
+    println!(
+        "  {:>3} {:>12} {:>9} {:>12} {:>9}",
+        "t", "ours_ms", "spread", "c_ms", "spread"
+    );
     for &t in &T_FIT {
         let p = make_params(a.m_cost, t, a.lanes, threads);
         match cf {
@@ -596,14 +608,10 @@ fn run_decompose(a: &Args) {
     }
 
     let (o_fix, o_slope, o_r2) = fit(&xs, &ours);
-    println!(
-        "\n  ours    fill {o_slope:>8.3} ms/pass   fixed {o_fix:>8.3} ms   (r2 {o_r2:.5})"
-    );
+    println!("\n  ours    fill {o_slope:>8.3} ms/pass   fixed {o_fix:>8.3} ms   (r2 {o_r2:.5})");
     if !theirs.is_empty() {
         let (c_fix, c_slope, c_r2) = fit(&xs, &theirs);
-        println!(
-            "  c       fill {c_slope:>8.3} ms/pass   fixed {c_fix:>8.3} ms   (r2 {c_r2:.5})"
-        );
+        println!("  c       fill {c_slope:>8.3} ms/pass   fixed {c_fix:>8.3} ms   (r2 {c_r2:.5})");
         println!(
             "  ours/c  fill {:>8.3}x            fixed {:>8.3}x   \
              (fixed gap {:+.2} ms, fill gap {:+.2} ms/pass)",
@@ -671,8 +679,8 @@ fn run_stages(a: &Args) {
     let mut tag = [0u8; OUTLEN];
 
     for r in 0..(a.warmup + a.reps) {
-        let mut blockhash = initial_hash(a.alg, Version::V0x13, &p, PWD, SALT, &[], &[])
-            .expect("initial_hash");
+        let mut blockhash =
+            initial_hash(a.alg, Version::V0x13, &p, PWD, SALT, &[], &[]).expect("initial_hash");
 
         // Allocation. On this crate's path that is `posix_memalign` plus an
         // explicit `memset` of the whole arena, because `ARENA_ALIGN` is 64 and
@@ -731,7 +739,10 @@ fn run_stages(a: &Args) {
         a.reps,
         a.warmup
     );
-    println!("  {:<14} {:>10} {:>8} {:>9}", "stage", "ms", "% total", "spread");
+    println!(
+        "  {:<14} {:>10} {:>8} {:>9}",
+        "stage", "ms", "% total", "spread"
+    );
     for (name, v) in rows {
         let m = median(v);
         println!(
@@ -795,7 +806,9 @@ fn run_memory(a: &Args) {
         // Warm: the same bytes again, now resident. Faults are gone, so this is
         // the memset alone -- and it is also the speed `explicit_bzero` runs at.
         let t1 = Instant::now();
-        arena.as_mut_slice().fill(argon2_rust::__internal::Block::ZERO);
+        arena
+            .as_mut_slice()
+            .fill(argon2_rust::__internal::Block::ZERO);
         let d_warm = t1.elapsed().as_secs_f64() * 1e3;
         black_box(arena.as_slice()[0].0[0]);
 
@@ -817,7 +830,10 @@ fn run_memory(a: &Args) {
         }
     }
 
-    println!("  arena = {n} blocks = {mib:.0} MiB   ({} reps + {} warmup)", a.reps, a.warmup);
+    println!(
+        "  arena = {n} blocks = {mib:.0} MiB   ({} reps + {} warmup)",
+        a.reps, a.warmup
+    );
     println!(
         "  {:<34} {:>10} {:>10} {:>9}",
         "operation", "ms", "GiB/s", "spread"
@@ -1066,9 +1082,7 @@ fn report_one(a: &Args, p: &Params, ms: &[f64], label: &str) {
     );
     println!(
         "  ns/block   med {:>9.2}   ({} reps + {} warmup)",
-        ns_block,
-        a.reps,
-        a.warmup
+        ns_block, a.reps, a.warmup
     );
 }
 
@@ -1130,7 +1144,11 @@ fn run_single(a: &Args) {
                     b.blocks,
                     spread_pct(&b.ns_per_block)
                 );
-                if b.data_independent { di.push(m) } else { dd.push(m) }
+                if b.data_independent {
+                    di.push(m)
+                } else {
+                    dd.push(m)
+                }
             }
             if !di.is_empty() && !dd.is_empty() {
                 let (a2, b2) = (median(&di), median(&dd));
@@ -1196,8 +1214,10 @@ fn run_sweep(a: &Args) {
             "\n{:<14} {:>9} {:>9} {:>8}   {:>9} {:>9} {:>8}",
             "derived", "fill_ours", "fill_c", "ratio", "fix_ours", "fix_c", "ratio"
         );
-        println!("{:<14} {:>9} {:>9} {:>8}   {:>9} {:>9} {:>8}",
-                 "(ms/pass)", "", "", "", "(ms)", "", "");
+        println!(
+            "{:<14} {:>9} {:>9} {:>8}   {:>9} {:>9} {:>8}",
+            "(ms/pass)", "", "", "", "(ms)", "", ""
+        );
         for &(m, p_) in &[
             (65536u32, 1u32),
             (65536, 2),
@@ -1206,7 +1226,12 @@ fn run_sweep(a: &Args) {
             (262144, 2),
             (262144, 4),
         ] {
-            let get = |t: u32| by_mp.iter().find(|r| r.0 == m && r.1 == t && r.2 == p_).copied();
+            let get = |t: u32| {
+                by_mp
+                    .iter()
+                    .find(|r| r.0 == m && r.1 == t && r.2 == p_)
+                    .copied()
+            };
             let (Some(t1), Some(t3)) = (get(1), get(3)) else {
                 continue;
             };

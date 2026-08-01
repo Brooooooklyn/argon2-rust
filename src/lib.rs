@@ -215,15 +215,15 @@ pub mod __internal {
         from_base64, num_len, to_base64,
     };
     pub use crate::fill_block::{Backend, FillSegmentFn, backend, detect, fill_segment_fn};
+    /// The arena release-path observation point, for
+    /// `tests/allocation_audit.rs`. See [`crate::memory::audit`].
+    #[cfg(feature = "std")]
+    pub use crate::memory::audit;
     pub use crate::memory::{
         ARENA_ALIGN, Arena, ArenaGuard, Workspace, clear_internal_memory,
         clear_internal_memory_blocks, clear_internal_memory_u64, secure_wipe, secure_wipe_blocks,
         secure_wipe_raw, secure_wipe_u64,
     };
-    /// The arena release-path observation point, for
-    /// `tests/allocation_audit.rs`. See [`crate::memory::audit`].
-    #[cfg(feature = "std")]
-    pub use crate::memory::audit;
     pub use crate::params::validate_inputs;
 
     /// `bumpalo`, re-exported so callers can name the types

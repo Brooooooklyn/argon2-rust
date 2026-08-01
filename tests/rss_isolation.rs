@@ -70,7 +70,11 @@ struct Report {
 
 impl Report {
     fn check(&mut self, name: &str, grew_kib: i64, budget_kib: i64, would_leak_kib: i64) {
-        let verdict = if grew_kib <= budget_kib { "ok" } else { "FAILED" };
+        let verdict = if grew_kib <= budget_kib {
+            "ok"
+        } else {
+            "FAILED"
+        };
         println!(
             "{name}: RSS {grew_kib:+} KiB (budget {budget_kib} KiB, \
              a leak would be about {would_leak_kib} KiB) ... {verdict}"
@@ -137,7 +141,9 @@ fn alternating_costs_do_not_grow_the_process(report: &mut Report) {
     let round = |hasher: &mut argon2_rust::Hasher, tag: &mut [u8; 32]| {
         for params in [small, large] {
             hasher.set_argon2(Argon2::new(Algorithm::Argon2id, Version::V0x13, params));
-            hasher.hash_into(b"password", b"somesalt", tag).expect("hash");
+            hasher
+                .hash_into(b"password", b"somesalt", tag)
+                .expect("hash");
         }
     };
 
