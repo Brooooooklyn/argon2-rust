@@ -417,8 +417,10 @@ fn acquire_owned_twice_yields_two_distinct_live_allocations() {
 /// compare against the one-shot path. Under a plain `cargo test` this is a
 /// smoke test; under Miri (`-Zmiri-disable-isolation`) it is a data-race check.
 ///
-/// Not on wasi: no threads exist there to run this with.
-#[cfg(not(target_arch = "wasm32"))]
+/// Not on plain wasip1: no threads exist there to run this with.
+/// wasip1-threads has them and runs this. (`wasi_threadless` comes from
+/// build.rs — see it for why not `cfg(target_feature = "atomics")`.)
+#[cfg(not(wasi_threadless))]
 #[test]
 fn concurrent_hashers_on_reused_arenas_agree_with_the_one_shot_api() {
     let lanes = if MIRI { 2 } else { 4 };

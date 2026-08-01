@@ -71,7 +71,31 @@ jobs:
       - run: cargo build --release --no-default-features --target thumbv7em-none-eabi
 
   wasm:
-    name: wasm (wasm32-wasip1, wasmtime)
+    name: wasm (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: wasip1, simd128
+            target: wasm32-wasip1
+            runner: wasmtime run --dir=/
+            wasmtime-version: "" # latest
+            features: +simd128
+            suites: --test kat --test vectors --test reuse --test allocation_audit
+          - name: wasip1, scalar fallback
+            target: wasm32-wasip1
+            runner: wasmtime run --dir=/
+            wasmtime-version: ""
+            features: -simd128
+            suites: --test kat --test vectors
+          - name: wasip1-threads, simd128
+            target: wasm32-wasip1-threads
+            runner: wasmtime run -W threads=y -S threads=y --dir=/
+            # wasi-threads was removed from wasmtime after v38; this leg is
+            # pinned to the last version that runs it.
+            wasmtime-version: "@38.0.4"
+            features: +simd128
+            suites: --test kat --test vectors --test reuse --test allocation_audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -81,24 +105,20 @@ jobs:
           cd phc-winner-argon2 && git checkout "$PHC_COMMIT"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-wasip1
+          targets: ${{ matrix.target }}
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasmtime
+          tool: wasmtime${{ matrix.wasmtime-version }}
       # `wasmtime run --dir=/` so the guest can read the KAT files through
       # the host-absolute CARGO_MANIFEST_DIR. differential is excluded (it
-      # needs make + cc); thread-dependent and catch_unwind tests are cfg'd
-      # out on wasm32 (wasi has no threads and is panic=abort).
-      - name: test (simd128 backend)
-        run: cargo test --release --target wasm32-wasip1 --lib --test kat --test vectors --test reuse --test allocation_audit
+      # needs make + cc); catch_unwind tests are cfg'd out on wasm32
+      # (panic=abort), thread tests only on plain wasip1 (see build.rs).
+      - name: cargo test
+        run: cargo test --release --target ${{ matrix.target }} --lib ${{ matrix.suites }}
         env:
-          RUSTFLAGS: -C target-feature=+simd128
-          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run --dir=/
-      - name: test (scalar fallback)
-        run: cargo test --release --target wasm32-wasip1 --lib --test kat --test vectors
-        env:
-          RUSTFLAGS: -C target-feature=-simd128
-          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run --dir=/
+          RUSTFLAGS: -C target-feature=${{ matrix.features }}
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: ${{ matrix.runner }}
+          CARGO_TARGET_WASM32_WASIP1_THREADS_RUNNER: ${{ matrix.runner }}
 
   benches-compile:
     name: benches compile

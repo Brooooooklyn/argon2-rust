@@ -152,8 +152,9 @@ for (pwd, salt) in &credentials {
         │    aarch64: NEON is compile-time on Apple/Windows (measured
         │    fastest there); other aarch64 hosts run a one-time ~4 ms
         │    shootout — Neoverse N1 gets scalar, Apple-class cores NEON
-        │    wasm32: SIMD128 selected at compile time (measured 1.6x
-        │    over scalar under wasmtime)
+        │    wasm32: SIMD128 selected at compile time (1.5-1.6x over
+        │    scalar under wasmtime); on wasm32-wasip1-threads the worker
+        │    pool runs for real — 3.9x from 4 lanes
         ▼
   one fn-pointer resolve per hash, one indirect call per *segment*
   (thousands of blocks) — dispatch cost is one relaxed atomic load

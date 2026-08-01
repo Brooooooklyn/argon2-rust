@@ -839,9 +839,10 @@ fn encoded_hashes_round_trip_through_one_hasher_across_mixed_costs() {
 /// that put arena state anywhere process-wide (a `static`, a lazily initialised
 /// pool) would surface as cross-talk here and nowhere else in this file.
 ///
-/// Not on wasi: there are no threads there (`spawn` always fails), so the
-/// premise of this test cannot be set up at all.
-#[cfg(not(target_arch = "wasm32"))]
+/// Not on plain wasip1: there are no threads there (`spawn` always fails),
+/// so the premise cannot be set up. wasip1-threads has them and runs this.
+/// (`wasi_threadless` comes from build.rs — see it for why not `atomics`.)
+#[cfg(not(wasi_threadless))]
 #[test]
 fn hashers_on_several_threads_stay_independent() {
     let cases = mixed_cases(0x_5EED_0002, 24);
