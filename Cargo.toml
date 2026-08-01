@@ -82,6 +82,11 @@ bumpalo = { version = "3.20.3", default-features = false, optional = true }
 # `internal-api` on, without leaking it into a plain `cargo build`.
 # `default-features = false` keeps `cargo test --no-default-features` honest.
 argon2-rust = { path = ".", default-features = false, features = ["internal-api"] }
+
+# Criterion (through rayon) does not build for wasi, and no bench or test
+# target runs there anyway — `cargo test --target wasm32-wasip1` covers the
+# library and the integration tests, never the benches.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]

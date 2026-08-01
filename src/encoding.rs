@@ -1419,12 +1419,24 @@ mod tests {
             Err(Error::LanesTooFew)
         );
         // lanes > ARGON2_MAX_LANES (16777215).
+        #[cfg(target_pointer_width = "64")]
         assert_eq!(
             decode_string(
                 "$argon2i$v=19$m=4294967295,t=2,p=16777216$c29tZXNhbHQ$9sTbSlTio3Biev89thdrlKKiCaYsjjYVJxGAL3swxpQ",
                 Algorithm::Argon2i
             ),
             Err(Error::LanesTooMany)
+        );
+        // On a 32-bit target ARGON2_MAX_MEMORY is 2 MiB (the C's own
+        // pointer-width rule), so — exactly as the C on 32-bit — the memory
+        // check fires before the lanes check gets a chance to.
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(
+            decode_string(
+                "$argon2i$v=19$m=4294967295,t=2,p=16777216$c29tZXNhbHQ$9sTbSlTio3Biev89thdrlKKiCaYsjjYVJxGAL3swxpQ",
+                Algorithm::Argon2i
+            ),
+            Err(Error::MemoryTooMuch)
         );
     }
 

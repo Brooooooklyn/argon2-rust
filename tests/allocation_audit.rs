@@ -416,6 +416,9 @@ fn acquire_owned_twice_yields_two_distinct_live_allocations() {
 /// Run that on a *reused* arena, many rounds, several hashers at once, and
 /// compare against the one-shot path. Under a plain `cargo test` this is a
 /// smoke test; under Miri (`-Zmiri-disable-isolation`) it is a data-race check.
+///
+/// Not on wasi: no threads exist there to run this with.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn concurrent_hashers_on_reused_arenas_agree_with_the_one_shot_api() {
     let lanes = if MIRI { 2 } else { 4 };
@@ -592,6 +595,9 @@ fn a_pooled_hash_leaves_nothing_behind_when_the_hasher_dies() {
 /// The wipe must survive a panic unwinding out of the borrow. `ArenaGuard`'s
 /// `Drop` is the only thing standing between an unwind and a workspace full of
 /// somebody's password material, and no test in `src/` exercises it.
+///
+/// Not on wasi: the test unwinds on purpose, and wasi is panic=abort.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn an_unwinding_borrow_still_wipes_and_still_returns_the_arena() {
     const N: usize = 32;

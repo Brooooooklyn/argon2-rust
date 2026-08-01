@@ -15,7 +15,8 @@ C reference, OpenSSL, and the popular Rust crates, on both x86-64 and aarch64.
   vectors, and a live differential harness comparing tags *and* C error codes
 - **Runtime CPU dispatch**: AVX-512 → AVX2 → SSE2(+SSSE3) → NEON → scalar,
   cached in a single atomic; safe code can never reach an instruction set the
-  CPU lacks
+  CPU lacks. On wasm32 a **SIMD128** backend is selected at compile time
+  (`-C target-feature=+simd128`), the only sound choice for a wasm module
 - **Persistent worker pool** for `lanes > 1` (3 thread spawns per hash instead
   of the C's 48), with a hand-rolled 0.6 µs barrier
 - **OS-native memory**: `mmap` + `MADV_HUGEPAGE` arena on Linux, secure
@@ -148,6 +149,11 @@ for (pwd, salt) in &credentials {
         ▼          ▼        ▼         ▼        ▼        ▼
       AVX-512 →  AVX2  →  SSE2  →   NEON  → scalar   (cached in one AtomicU8)
         │    (SSSE3 probed separately at runtime)
+        │    aarch64: NEON is compile-time on Apple/Windows (measured
+        │    fastest there); other aarch64 hosts run a one-time ~4 ms
+        │    shootout — Neoverse N1 gets scalar, Apple-class cores NEON
+        │    wasm32: SIMD128 selected at compile time (measured 1.6x
+        │    over scalar under wasmtime)
         ▼
   one fn-pointer resolve per hash, one indirect call per *segment*
   (thousands of blocks) — dispatch cost is one relaxed atomic load

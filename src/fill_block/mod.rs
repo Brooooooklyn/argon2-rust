@@ -63,6 +63,12 @@ pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx512;
 
+// WebAssembly has no runtime feature detection a module can survive (SIMD
+// instructions fail validation on engines that lack them), so the module
+// exists exactly when the engine contract was given at compile time.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+pub mod wasm128;
+
 // ---------------------------------------------------------------------------
 // Backend
 // ---------------------------------------------------------------------------
@@ -81,6 +87,8 @@ pub enum Backend {
     Avx2 = 3,
     /// x86-64 AVX-512F.
     Avx512 = 4,
+    /// wasm32 fixed-width SIMD128. Compile-time selected; see `wasm128`.
+    Wasm128 = 5,
 }
 
 /// The signature every backend's `fill_segment` has.
@@ -98,12 +106,13 @@ pub type FillSegmentFn = unsafe fn(&Instance, Position);
 
 impl Backend {
     /// Every backend, in ascending preference order.
-    pub const ALL: [Backend; 5] = [
+    pub const ALL: [Backend; 6] = [
         Backend::Scalar,
         Backend::Neon,
         Backend::Sse2,
         Backend::Avx2,
         Backend::Avx512,
+        Backend::Wasm128,
     ];
 
     /// Short lowercase name, handy for bench ids and test output.
@@ -116,6 +125,7 @@ impl Backend {
             Backend::Sse2 => "sse2",
             Backend::Avx2 => "avx2",
             Backend::Avx512 => "avx512",
+            Backend::Wasm128 => "wasm128",
         }
     }
 
@@ -132,6 +142,7 @@ impl Backend {
             Backend::Sse2 => have_sse2(),
             Backend::Avx2 => have_avx2(),
             Backend::Avx512 => have_avx512f(),
+            Backend::Wasm128 => have_wasm_simd128(),
         }
     }
 
@@ -149,6 +160,7 @@ impl Backend {
             2 => Backend::Sse2,
             3 => Backend::Avx2,
             4 => Backend::Avx512,
+            5 => Backend::Wasm128,
             _ => Backend::Scalar,
         }
     }
@@ -219,6 +231,21 @@ fn have_neon() -> bool {
     {
         std::arch::is_aarch64_feature_detected!("neon")
     }
+}
+
+/// wasm32 SIMD128. There is no runtime probe a wasm module can survive
+/// (SIMD instructions fail validation where unsupported), so the answer is
+/// purely compile-time: it is `true` exactly when the crate was built with
+/// `-C target-feature=+simd128`.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+fn have_wasm_simd128() -> bool {
+    true
+}
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+#[inline]
+fn have_wasm_simd128() -> bool {
+    false
 }
 #[cfg(not(all(feature = "std", target_arch = "aarch64")))]
 #[inline]
@@ -373,6 +400,8 @@ pub fn detect() -> Backend {
         Backend::Sse2
     } else if have_neon() && neon_wins_here() {
         Backend::Neon
+    } else if have_wasm_simd128() {
+        Backend::Wasm128
     } else {
         Backend::Scalar
     }
@@ -437,6 +466,11 @@ pub fn fill_segment_fn(backend: Backend) -> FillSegmentFn {
         Backend::Avx512 => avx512::fill_segment,
         #[cfg(not(target_arch = "x86_64"))]
         Backend::Avx512 => scalar::fill_segment,
+
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        Backend::Wasm128 => wasm128::fill_segment,
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+        Backend::Wasm128 => scalar::fill_segment,
     }
 }
 
@@ -492,6 +526,17 @@ mod tests {
                 detect(),
                 Backend::Sse2 | Backend::Avx2 | Backend::Avx512
             ));
+        }
+        if cfg!(target_arch = "wasm32") {
+            assert!(!have_sse2());
+            assert!(!have_avx2());
+            assert!(!have_avx512f());
+            assert!(!have_neon());
+            if cfg!(target_feature = "simd128") {
+                assert_eq!(detect(), Backend::Wasm128);
+            } else {
+                assert_eq!(detect(), Backend::Scalar);
+            }
         }
     }
 

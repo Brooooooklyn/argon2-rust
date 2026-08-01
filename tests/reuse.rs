@@ -838,6 +838,10 @@ fn encoded_hashes_round_trip_through_one_hasher_across_mixed_costs() {
 /// two threads cannot share one — but they *can* each hold their own, and a bug
 /// that put arena state anywhere process-wide (a `static`, a lazily initialised
 /// pool) would surface as cross-talk here and nowhere else in this file.
+///
+/// Not on wasi: there are no threads there (`spawn` always fails), so the
+/// premise of this test cannot be set up at all.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn hashers_on_several_threads_stay_independent() {
     let cases = mixed_cases(0x_5EED_0002, 24);
@@ -886,6 +890,8 @@ fn hashers_on_several_threads_stay_independent() {
 /// much as [`assert_same_tag`]'s ability to notice when they do not, so prove
 /// it notices — and that it names the case and the first differing byte, which
 /// is what makes a real failure diagnosable.
+/// Not on wasi: the check works by `catch_unwind`, and wasi is panic=abort.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn the_comparator_catches_a_changed_tag() {
     let case = Case {

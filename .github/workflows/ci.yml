@@ -70,6 +70,36 @@ jobs:
           targets: thumbv7em-none-eabi
       - run: cargo build --release --no-default-features --target thumbv7em-none-eabi
 
+  wasm:
+    name: wasm (wasm32-wasip1, wasmtime)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone phc-winner-argon2 (KAT traces)
+        run: |
+          git clone --filter=blob:none https://github.com/P-H-C/phc-winner-argon2.git phc-winner-argon2
+          cd phc-winner-argon2 && git checkout "$PHC_COMMIT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasmtime
+      # `wasmtime run --dir=/` so the guest can read the KAT files through
+      # the host-absolute CARGO_MANIFEST_DIR. differential is excluded (it
+      # needs make + cc); thread-dependent and catch_unwind tests are cfg'd
+      # out on wasm32 (wasi has no threads and is panic=abort).
+      - name: test (simd128 backend)
+        run: cargo test --release --target wasm32-wasip1 --lib --test kat --test vectors --test reuse --test allocation_audit
+        env:
+          RUSTFLAGS: -C target-feature=+simd128
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run --dir=/
+      - name: test (scalar fallback)
+        run: cargo test --release --target wasm32-wasip1 --lib --test kat --test vectors
+        env:
+          RUSTFLAGS: -C target-feature=-simd128
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run --dir=/
+
   benches-compile:
     name: benches compile
     runs-on: ubuntu-latest

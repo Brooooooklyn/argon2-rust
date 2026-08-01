@@ -2548,6 +2548,8 @@ mod tests {
     /// If this regresses, it does not fail — it hangs. That is the point.
     #[test]
     #[cfg(feature = "parallel")]
+    // wasip1 is panic=abort: there is no unwinding to test there.
+    #[cfg_attr(target_arch = "wasm32", ignore = "no unwinding on wasi (panic=abort)")]
     fn a_panicking_trace_callback_unwinds_instead_of_deadlocking_the_pool() {
         // 4 lanes and 4 threads, so there really are helpers parked on the
         // barrier when the callback runs.

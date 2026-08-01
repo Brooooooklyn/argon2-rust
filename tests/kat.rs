@@ -553,6 +553,9 @@ fn golden_tag(file: &str) -> Vec<u8> {
 /// A trace test that silently compares nothing is worse than no test at all,
 /// so flip one bit of one word of one block and check that
 /// `assert_trace_matches` panics *and* names the right pass, block and word.
+///
+/// Not on wasi: the check works by `catch_unwind`, and wasi is panic=abort.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn the_comparator_catches_a_single_flipped_bit() {
     let golden = read_golden("argon2i");
