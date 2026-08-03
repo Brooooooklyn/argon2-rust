@@ -159,6 +159,7 @@ macro_rules! private_modules {
 private_modules!(blake2b, block, core, encoding, fill_block, memory);
 
 pub use crate::core::{Argon2, Hasher};
+pub use crate::encoding::encoded_len;
 pub use crate::error::Error;
 pub use crate::fill_block::Backend;
 pub use crate::params::{Algorithm, Params, Version};

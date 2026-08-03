@@ -1156,6 +1156,44 @@ impl Argon2 {
         )
     }
 
+    /// `argon2_verify_ctx()`: decode a PHC string and check `pwd` against it,
+    /// with a secret key and associated data.
+    ///
+    /// # Errors
+    ///
+    /// As [`Argon2::verify_encoded`], plus the secret/ad validation errors of
+    /// [`Argon2::hash_into_with_ad`].
+    pub fn verify_encoded_with_ad(
+        encoded: &str,
+        pwd: &[u8],
+        secret: &[u8],
+        ad: &[u8],
+        algorithm: Algorithm,
+    ) -> Result<(), Error> {
+        // argon2.c:260-262 `if (pwdlen > ARGON2_MAX_PWD_LENGTH)`.
+        if pwd.len() > MAX_PWD_LENGTH as usize {
+            return Err(Error::PwdTooLong);
+        }
+
+        // argon2.c:289 `decode_string(&ctx, encoded, type)`.
+        let decoded = crate::encoding::decode_string(encoded, algorithm)?;
+
+        // argon2.c:302 `argon2_verify_ctx(&ctx, desired_result, type)`.
+        let argon2 = Argon2::new(decoded.algorithm, decoded.version, decoded.params);
+        let mut computed = try_zeroed_vec(argon2.params.output_len())?;
+        let result =
+            argon2.hash_into_with_ad(pwd, &decoded.salt, secret, ad, &mut computed);
+        let matched = result.is_ok() && constant_time_eq(&computed, &decoded.hash);
+        clear_internal_memory(&mut computed);
+
+        result?;
+        if matched {
+            Ok(())
+        } else {
+            Err(Error::VerifyMismatch)
+        }
+    }
+
     // -----------------------------------------------------------------
     // Password-flavoured spellings of the three entry points above
     // -----------------------------------------------------------------
@@ -1517,6 +1555,48 @@ impl Hasher {
         self.verify_using(&argon2, pwd, &decoded.salt, &decoded.hash)
     }
 
+    /// [`Argon2::verify_encoded_with_ad`], reusing the arena.
+    ///
+    /// # Errors
+    ///
+    /// As [`Argon2::verify_encoded_with_ad`].
+    pub fn verify_encoded_with_ad(
+        &mut self,
+        encoded: &str,
+        pwd: &[u8],
+        secret: &[u8],
+        ad: &[u8],
+        algorithm: Algorithm,
+    ) -> Result<(), Error> {
+        // argon2.c:260-262 `if (pwdlen > ARGON2_MAX_PWD_LENGTH)`.
+        if pwd.len() > MAX_PWD_LENGTH as usize {
+            return Err(Error::PwdTooLong);
+        }
+
+        // argon2.c:289 `decode_string(&ctx, encoded, type)`.
+        let decoded = crate::encoding::decode_string(encoded, algorithm)?;
+
+        // argon2.c:302 `argon2_verify_ctx(&ctx, desired_result, type)`.
+        let argon2 = Argon2::new(decoded.algorithm, decoded.version, decoded.params);
+
+        if decoded.params.memory_blocks() as usize > self.pooled_ceiling() {
+            // As `verify_encoded`: keep an attacker-chosen `m_cost` off the
+            // pooled arena by running on a one-shot arena instead.
+            let mut computed = try_zeroed_vec(argon2.params.output_len())?;
+            let result =
+                argon2.hash_into_with_ad(pwd, &decoded.salt, secret, ad, &mut computed);
+            let matched = result.is_ok() && constant_time_eq(&computed, &decoded.hash);
+            clear_internal_memory(&mut computed);
+            result?;
+            return if matched {
+                Ok(())
+            } else {
+                Err(Error::VerifyMismatch)
+            };
+        }
+        self.verify_using_ad(&argon2, pwd, &decoded.salt, secret, ad, &decoded.hash)
+    }
+
     // -----------------------------------------------------------------
     // Password-flavoured spellings, matching `Argon2`'s
     // -----------------------------------------------------------------
@@ -1636,8 +1716,20 @@ impl Hasher {
         salt: &[u8],
         expected: &[u8],
     ) -> Result<(), Error> {
+        self.verify_using_ad(argon2, pwd, salt, &[], &[], expected)
+    }
+
+    fn verify_using_ad(
+        &mut self,
+        argon2: &Argon2,
+        pwd: &[u8],
+        salt: &[u8],
+        secret: &[u8],
+        ad: &[u8],
+        expected: &[u8],
+    ) -> Result<(), Error> {
         let mut computed = try_zeroed_vec(argon2.params.output_len())?;
-        let result = self.hash_into_using(argon2, pwd, salt, &[], &[], &mut computed);
+        let result = self.hash_into_using(argon2, pwd, salt, secret, ad, &mut computed);
         // argon2.c:349 `argon2_compare(hash, context->out, context->outlen)`.
         let matched = result.is_ok() && constant_time_eq(&computed, expected);
         clear_internal_memory(&mut computed);

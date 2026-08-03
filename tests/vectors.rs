@@ -962,3 +962,90 @@ fn threads_above_lanes_are_clamped_and_still_agree() {
 
     assert_eq!(clamped, normal);
 }
+
+// ---------------------------------------------------------------------------
+// verify_encoded_with_ad — the C's argon2_verify_ctx surface
+// ---------------------------------------------------------------------------
+
+const AD_PWD: &[u8] = b"password";
+const AD_SALT: &[u8] = b"somesaltsomesalt";
+/// The genkat.c secret and associated data, the reference's own values.
+const AD_SECRET: &[u8] = &[0x03; 8];
+const AD_AD: &[u8] = &[0x04; 12];
+
+fn ad_fixture() -> (Argon2, String) {
+    let params = Params::new(32, 3, 4, 32).expect("params");
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut tag = [0u8; 32];
+    argon2
+        .hash_into_with_ad(AD_PWD, AD_SALT, AD_SECRET, AD_AD, &mut tag)
+        .expect("hash with ad");
+    let encoded = argon2_rust::__internal::encode_string_alloc(
+        Algorithm::Argon2id,
+        Version::V0x13,
+        &params,
+        AD_SALT,
+        &tag,
+    )
+    .expect("encode");
+    (argon2, encoded)
+}
+
+#[test]
+fn verify_encoded_with_ad_accepts_the_right_inputs() {
+    let (_, encoded) = ad_fixture();
+    Argon2::verify_encoded_with_ad(&encoded, AD_PWD, AD_SECRET, AD_AD, Algorithm::Argon2id)
+        .expect("must verify");
+}
+
+#[test]
+fn verify_encoded_with_ad_rejects_any_changed_input() {
+    let (_, encoded) = ad_fixture();
+    for (what, pwd, secret, ad) in [
+        ("wrong password", b"passwore".as_slice(), AD_SECRET, AD_AD),
+        ("wrong secret", AD_PWD, [0x99; 8].as_slice(), AD_AD),
+        ("wrong ad", AD_PWD, AD_SECRET, [0x99; 12].as_slice()),
+        ("missing secret", AD_PWD, [].as_slice(), AD_AD),
+        ("missing ad", AD_PWD, AD_SECRET, [].as_slice()),
+    ] {
+        assert_eq!(
+            Argon2::verify_encoded_with_ad(&encoded, pwd, secret, ad, Algorithm::Argon2id),
+            Err(Error::VerifyMismatch),
+            "{what}"
+        );
+    }
+}
+
+#[test]
+fn verify_encoded_with_ad_rejects_the_wrong_algorithm() {
+    let (_, encoded) = ad_fixture();
+    assert_eq!(
+        Argon2::verify_encoded_with_ad(&encoded, AD_PWD, AD_SECRET, AD_AD, Algorithm::Argon2i),
+        Err(Error::DecodingFail)
+    );
+}
+
+#[test]
+fn pooled_verify_encoded_with_ad_matches_the_one_shot_api() {
+    let (argon2, encoded) = ad_fixture();
+    let mut hasher = argon2.hasher();
+    hasher
+        .verify_encoded_with_ad(&encoded, AD_PWD, AD_SECRET, AD_AD, Algorithm::Argon2id)
+        .expect("pooled must verify");
+    assert_eq!(
+        hasher.verify_encoded_with_ad(&encoded, AD_PWD, &[0x99; 8], AD_AD, Algorithm::Argon2id),
+        Err(Error::VerifyMismatch)
+    );
+}
+
+#[test]
+fn encoded_len_is_the_c_buffer_size_including_nul() {
+    let params = Params::new(32, 3, 4, 32).expect("params");
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let encoded = argon2.hash_encoded(AD_PWD, AD_SALT).expect("encode");
+    assert_eq!(
+        encoded.len() + 1,
+        argon2_rust::encoded_len(Algorithm::Argon2id, 3, 32, 4, AD_SALT.len() as u32, 32),
+        "the C's argon2_encodedlen counts the NUL; a Rust String is one byte shorter"
+    );
+}
