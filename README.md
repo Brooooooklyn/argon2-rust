@@ -23,7 +23,13 @@ C reference, OpenSSL, and the popular Rust crates, on both x86-64 and aarch64.
   wipe with a compiler barrier that survives `-O3`, optional pooled arena
   reuse across hashes
 - **Full API**: raw hash, PHC encode/decode, verify, d/i/id × v0x10/v0x13,
-  password-flavored aliases, error codes identical to the C (`-1..-35`)
+  password-flavored aliases, error codes identical to the C (`-1..-35`, plus
+  one crate-specific `-100` for OS-entropy failure)
+- **Salt generation without a dependency**: `hash_password_with_random_salt`
+  reads the OS CSPRNG through the right entry point per platform
+  (`getrandom(2)`, `getentropy`, `CCRandomGenerateBytes`, `ProcessPrng`, WASI
+  preview-1 `random_get`, `/dev/urandom`), each declared by hand. Targets with
+  no known source return `Error::OsRandom` rather than failing the build
 
 ## Performance
 
@@ -125,8 +131,32 @@ argon2.hash_into(b"password", b"random salt 16B!", &mut tag)?;
 
 // PHC string format
 let encoded = argon2.hash_encoded(b"password", b"random salt 16B!")?;
-assert!(argon2.verify_encoded(b"password", &encoded).is_ok());
+assert!(Argon2::verify_encoded(&encoded, b"password", Algorithm::Argon2id).is_ok());
+
+// Or let the crate draw a fresh 16-byte salt from the OS:
+let encoded = argon2.hash_password_with_random_salt(b"password")?;
 ```
+
+Verifying a string you did not write? `m_cost` is ten digits of attacker-chosen
+decimal, and — exactly as in the C — nothing stands between it and the
+allocation, all 4 TiB of it. Bound it:
+
+```rust
+let ceiling = Params::new(1 << 16, 8, 4, 32)?;   // no stored hash should exceed this
+Argon2::verify_encoded_bounded(&encoded, b"password", Algorithm::Argon2id, &ceiling)?;
+```
+
+That bounds the *allocation*, not just the cost numbers: the length of the
+string is checked against what the ceiling could have produced before the
+decoder runs, since the decoder sizes its salt and tag buffers from the input.
+`_with_ad` and pooled `Hasher` spellings exist too.
+
+Memory is not the only resource `p` spends. Decoding sets `threads = lanes`, so
+the string also picks how many OS threads the verify spawns — which
+`ceiling.threads()` bounds. `Params::new` sets `threads == lanes` and so caps
+both together; reach for `Params::new_with_threads` to accept wide strings
+without spawning wide. Clamping never changes a verdict: only `lanes` feeds the
+tag.
 
 Hashing many passwords? Pool the arena — one allocation total instead of one
 per hash:

@@ -103,8 +103,14 @@ pub const PREHASH_DIGEST_LENGTH: usize = 64;
 pub const PREHASH_SEED_LENGTH: usize = 72;
 
 // ---------------------------------------------------------------------------
-// Limits from src/encoding.h (used by the PHC string decoder)
+// Limits from src/encoding.h
 // ---------------------------------------------------------------------------
+//
+// Mirrored for completeness, and unused — the C defines all three in
+// `encoding.h:22-24` and then never reads them, so `decode_string` here does
+// not either. Keeping them (rather than dropping them) is what makes the
+// header-for-header correspondence with the C checkable; do not add a use for
+// them without checking the C grew one first.
 
 /// `ARGON2_MAX_DECODED_LANES`.
 pub const MAX_DECODED_LANES: u32 = 255;

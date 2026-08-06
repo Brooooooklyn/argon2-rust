@@ -49,16 +49,35 @@ jobs:
         run: cargo test --release --all-features
 
   windows:
-    name: build + unit tests (windows)
+    name: build + tests (windows ${{ matrix.arch }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+          # 32-bit matters for more than coverage arithmetic: on x86 Windows
+          # `extern "system"` is `__stdcall` and decorates the symbol, so an FFI
+          # declaration that is merely `extern "C"` links fine on x86_64 and
+          # fails only here. `src/random.rs` had exactly that bug. The runner is
+          # x86_64, so this leg cross-compiles and runs the i686 binary under
+          # WOW64 — which Windows does natively.
+          - arch: i686
+            target: i686-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       # The differential/KAT integration tests need the vendored C tree and
       # make; unit tests cover the fill backends and core logic on Windows.
-      - run: cargo build --release
-      - run: cargo test --release --lib
+      - run: cargo build --release --target ${{ matrix.target }}
+      - run: cargo test --release --target ${{ matrix.target }} --lib
+      # `vectors` is what actually *calls* ProcessPrng. Without a call the
+      # import is never resolved and the ABI would go untested.
+      - run: cargo test --release --target ${{ matrix.target }} --test vectors
 
   no-std:
     name: no_std build (thumbv7em-none-eabi)
@@ -69,6 +88,61 @@ jobs:
         with:
           targets: thumbv7em-none-eabi
       - run: cargo build --release --no-default-features --target thumbv7em-none-eabi
+
+  entropy-target-matrix:
+    name: builds where there is no entropy source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, wasm32-wasip1, wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      # `src/random.rs` must never make a target uncompilable just because it
+      # has no entropy backend. It did once: a `compile_error!` arm took the
+      # whole crate — hashing included — down on every std target that is not
+      # unix, windows or WASI p1. `wasm32-unknown-unknown` is exactly such a
+      # target and is the cheapest one to keep in CI.
+      - run: cargo check --release --target wasm32-unknown-unknown
+      # All three WASI previews report `target_os = "wasi"` and differ only in
+      # `target_env`. p1 imports `wasi_snapshot_preview1::random_get`; p2 and p3
+      # must NOT, because their entropy is a component-model interface. These
+      # legs pin that the cfg split keeps compiling for both.
+      - run: cargo check --release --target wasm32-wasip1
+      - run: cargo check --release --target wasm32-wasip2
+
+  old-glibc:
+    name: link + run on glibc 2.17 (manylinux2014)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # `src/random.rs` must not name a libc symbol that only exists in newer
+      # glibc. It used to declare `getrandom` directly, which glibc gained in
+      # 2.25 — so this exact image failed to LINK, and the module's own
+      # /dev/urandom fallback could not help, because a missing symbol is a link
+      # error rather than a runtime errno. `syscall(2)` has always been there.
+      #
+      # Deliberately a `docker run` rather than a job-level `container:`:
+      # GitHub's container support injects a node20 runner, which needs glibc
+      # 2.28 and cannot start here.
+      #
+      # This is where a napi-rs-style native addon gets built, so it is a
+      # first-class target rather than a curiosity.
+      - name: build and run inside manylinux2014
+        run: |
+          docker run --rm -v "$PWD":/w -w /w \
+            quay.io/pypa/manylinux2014_x86_64 bash -euo pipefail -c '
+              ldd --version | head -1
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain stable
+              . "$HOME/.cargo/env"
+              export CARGO_TARGET_DIR=/tmp/target
+              cargo build --release
+              # Building is not enough: the symbol has to resolve at link time
+              # and the code has to actually run, so link and execute a binary
+              # that calls the entropy path.
+              cargo test --release --test vectors
+            '
 
   wasm:
     name: wasm (${{ matrix.name }})

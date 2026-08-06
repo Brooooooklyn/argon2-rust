@@ -171,6 +171,17 @@ const fn b64_char_to_byte(c: u32) -> u32 {
 /// olen = (len / 3) << 2;
 /// switch (len % 3) { case 2: olen++; /* fall through */ case 1: olen += 2; }
 /// ```
+///
+/// # 32-bit targets
+///
+/// On a target where `usize` is 32 bits, a `len` near `u32::MAX` makes
+/// `(len / 3) << 2` discard its top bits, so the answer wraps. That is not a
+/// defect to fix: `encoding.c:441` computes `((size_t)len / 3) << 2` and wraps
+/// identically where `size_t` is 32 bits, and this function exists to match the
+/// C. It cannot panic (`<<` discards bits rather than trapping, and the sums in
+/// [`encoded_len`] stay inside `usize` even after a wrap), and it is not on the
+/// allocation path — [`encode_string_alloc`] sizes its buffer with
+/// [`encoded_len_usize`], which takes real slice lengths and cannot wrap.
 #[must_use]
 pub const fn b64_len(len: u32) -> usize {
     b64_len_usize(len as usize)
@@ -178,8 +189,10 @@ pub const fn b64_len(len: u32) -> usize {
 
 /// [`b64_len`] over a `usize`, for slices.
 ///
-/// Cannot overflow: a slice is at most `isize::MAX` bytes, and
-/// `(isize::MAX / 3) * 4 < usize::MAX` on both 32- and 64-bit targets.
+/// Cannot overflow **when fed a slice length**, which is every caller: a slice
+/// is at most `isize::MAX` bytes, and `(isize::MAX / 3) * 4 < usize::MAX` on
+/// both 32- and 64-bit targets. The `u32` entry point above has no such bound —
+/// see its note.
 #[inline]
 const fn b64_len_usize(len: usize) -> usize {
     let mut olen = (len / 3) << 2;
@@ -671,6 +684,19 @@ fn decode_bin(src: &[u8], pos: &mut usize) -> Result<Vec<u8>, Error> {
 pub fn decode_string(encoded: &str, algorithm: Algorithm) -> Result<Decoded, Error> {
     let src = encoded.as_bytes();
     let mut pos = 0usize;
+
+    // argon2.c:268-271
+    //   encoded_len = strlen(encoded);
+    //   if (encoded_len > UINT32_MAX) return ARGON2_DECODING_FAIL;
+    //
+    // The C puts this in `argon2_verify`, one level up, and computes
+    // `max_field_len` from it. Here it lives in the decoder because all four
+    // verify entry points funnel through this function, so one check covers
+    // them and cannot drift; through the public API the behaviour is identical.
+    // Reachable only from a `&str` over 4 GiB.
+    if src.len() > u32::MAX as usize {
+        return Err(Error::DecodingFail);
+    }
 
     // CC("$"); CC(type_string);
     //

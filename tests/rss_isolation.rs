@@ -209,12 +209,39 @@ fn the_rss_probe_can_see_growth(report: &mut Report) {
     }
 }
 
+/// Whether `ps(1)` can be spawned at all.
+///
+/// Deliberately checks only that the *spawn* succeeded. A `ps` that runs and
+/// prints something unparseable still panics in [`rss_kib`], because that is a
+/// broken measurement and this file must not paper over one.
+///
+/// What this catches is a sandbox that denies subprocess execution — Codex's
+/// `workspace-write` profile does, and so do some CI containers. There the
+/// measurement is impossible rather than failing, which is not a statement
+/// about the crate. Before this check, such an environment saw
+/// `panicked at 'ps: PermissionDenied'` and reported the whole suite as broken.
+fn ps_can_run() -> bool {
+    std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .is_ok()
+}
+
 fn main() -> ExitCode {
     // Under Miri there is no `ps`, no real process and no resident set.
     // `tests/allocation_audit.rs` carries the part of this question that Miri
     // can actually answer.
     if cfg!(miri) {
         println!("rss_isolation: skipped under Miri (no resident set to measure)");
+        return ExitCode::SUCCESS;
+    }
+
+    // Same call, for an environment that forbids running `ps` at all.
+    if !ps_can_run() {
+        println!(
+            "rss_isolation: skipped (this environment cannot spawn `ps`, so \
+             resident set size is unmeasurable here)"
+        );
         return ExitCode::SUCCESS;
     }
 
