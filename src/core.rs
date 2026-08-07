@@ -996,9 +996,10 @@ pub const BOUNDED_MAX_SALT_LEN: u32 = 1024;
 /// ```
 /// use argon2_rust::{Algorithm, Argon2, Params, Version};
 ///
-/// // 64 KiB and one pass, small enough to run as a doctest. A real password
-/// // store wants `Params::DEFAULT_M_COST` and `Params::DEFAULT_T_COST`.
-/// let params = Params::new(64, 1, 1, 32)?;
+/// // m=19456 KiB, t=2, 1 lane, 32-byte tag: `Params::default()`, which is
+/// // what a password store should start from. About 8 ms per hash in release,
+/// // so this runs as a real doctest rather than only being compiled.
+/// let params = Params::default();
 /// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 /// let mut tag = [0u8; 32];
 /// argon2.hash_into(b"password", b"somesalt", &mut tag)?;
@@ -1008,9 +1009,23 @@ pub const BOUNDED_MAX_SALT_LEN: u32 = 1024;
 ///
 /// # Two spellings
 ///
-/// Every entry point here has a base name and a password-flavoured alias. The
-/// alias is a pure delegation, same function and same bytes, but the two
-/// families do not spell the *output format* the same way:
+/// Three entry points carry a password-flavoured alias, and only three:
+/// [`Argon2::hash_password_into`] for [`Argon2::hash_into`],
+/// [`Argon2::hash_password`] for [`Argon2::hash_encoded`], and
+/// [`Argon2::verify_password`] for [`Argon2::verify_encoded`]. Each of those
+/// three is a pure delegation, same function and same bytes.
+///
+/// Six other entry points have a base name and nothing else: [`Argon2::hash`],
+/// [`Argon2::verify`], [`Argon2::hash_into_with_ad`],
+/// [`Argon2::verify_encoded_with_ad`], [`Argon2::verify_encoded_bounded`] and
+/// [`Argon2::verify_encoded_bounded_with_ad`]. One runs the other way:
+/// `Argon2::hash_password_with_random_salt` has a password name with no base
+/// twin, and it is not a delegation either. It draws a fresh salt from the OS
+/// before calling [`Argon2::hash_encoded`], so two calls with one password do
+/// not return the same string.
+///
+/// Where the alias does exist, the two families do not spell the *output
+/// format* the same way:
 ///
 /// ```text
 ///                      raw -> caller buffer   raw -> Vec   PHC -> String
@@ -1389,9 +1404,13 @@ impl Argon2 {
     // are the names a C caller already knows: the per-algorithm wrappers it
     // links against are `argon2id_hash_raw` (argon2.c:230),
     // `argon2id_hash_encoded` (argon2.c:219) and `argon2id_verify`
-    // (argon2.c:325), each a one-line call into `argon2_hash`/`argon2_verify`,
-    // with the raw/encoded choice made by which out-pointer is non-NULL
-    // (argon2.c:160 `if (hash)`, argon2.c:165 `if (encoded && encodedlen)`).
+    // (argon2.c:325), each a single `return` into `argon2_hash`/`argon2_verify`
+    // and nothing else in the body. Only `argon2id_verify` fits on one line
+    // (argon2.c:327); the two hash wrappers each spend three on the argument
+    // list alone (argon2.c:225-227 and argon2.c:234-236), which is line
+    // wrapping and not work. The raw/encoded choice is made entirely by which
+    // out-pointer those wrappers pass as non-NULL (argon2.c:160 `if (hash)`,
+    // argon2.c:165 `if (encoded && encodedlen)`).
     //
     // Note what the C's names do that these do not: they carry the output
     // format, `raw` against `encoded`. Here the only difference between
@@ -1811,9 +1830,14 @@ fn decode_bounded(
 ///
 /// # Two spellings
 ///
-/// Mirrored from [`Argon2`], trap included: the password-flavoured names are
-/// pure delegations, but the two families do not spell the *output format* the
-/// same way.
+/// Mirrored from [`Argon2`], trap included. The same three entry points carry
+/// an alias and no others: [`Hasher::hash_password_into`],
+/// [`Hasher::hash_password`] and [`Hasher::verify_password`], each a pure
+/// delegation to [`Hasher::hash_into`], [`Hasher::hash_encoded`] and
+/// [`Hasher::verify_encoded`]. `Hasher::hash_password_with_random_salt` is
+/// again the exception that is neither: no base twin, and a fresh salt drawn
+/// per call rather than a delegation. Where the alias does exist, the two
+/// families do not spell the *output format* the same way.
 ///
 /// ```text
 ///                      raw -> caller buffer   raw -> Vec   PHC -> String

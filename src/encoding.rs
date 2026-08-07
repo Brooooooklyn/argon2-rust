@@ -253,10 +253,28 @@ pub const fn num_len(num: u32) -> usize {
 /// The order is the C's, kept so a call can be transcribed position for
 /// position: `argon2_encodedlen(t_cost, m_cost, parallelism, saltlen, hashlen,
 /// type)`, declared at `argon2.h:429` and defined at `argon2.c:447`. One
-/// argument did move. `type` went from last to first and became `algorithm`,
-/// so it sits where every other entry point in this crate takes its
-/// [`Algorithm`]. The other five kept their order among themselves;
-/// `parallelism` is spelled `lanes` here, the name [`Params`] uses for it.
+/// argument did move. `type` went from last to first and became `algorithm`.
+/// The other five kept their order among themselves; `parallelism` is spelled
+/// `lanes` here, the name [`Params`] uses for it.
+///
+/// First is where the *encoding and construction* side of this crate takes its
+/// [`Algorithm`], and only that side: this function, `encode_string_alloc`,
+/// `encode_string` (immediately after its `dst` buffer, so first among the
+/// value arguments), and [`Argon2::new`](crate::Argon2::new). The verify side
+/// did not move it, and the C is why: `argon2_verify(encoded, pwd, pwdlen,
+/// type)` (`argon2.h:347`) also ends with `type`, and that shape was worth
+/// keeping for the family that mirrors it. So `algorithm` comes **last** in
+/// `decode_string`,
+/// [`Argon2::verify_encoded`](crate::Argon2::verify_encoded),
+/// [`Argon2::verify_encoded_with_ad`](crate::Argon2::verify_encoded_with_ad),
+/// [`Argon2::verify_password`](crate::Argon2::verify_password) and the three
+/// [`Hasher`](crate::Hasher) methods of the same names. The four `_bounded`
+/// spellings are the near miss: `algorithm` still sits after everything the C
+/// passes, but this crate's own `ceiling` argument follows it, so it is third
+/// of four or fifth of six rather than last.
+///
+/// The rule to carry away is "encode and construct take the algorithm first,
+/// verify takes it last", not one position across the whole API.
 ///
 /// A caller who supplies the two costs the other way round gets no error back,
 /// and the reason is arithmetic rather than luck. `t_cost` and `m_cost` reach

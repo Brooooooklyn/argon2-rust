@@ -154,7 +154,9 @@ impl Error {
     ///
     /// // `ARGON2_OK` is `Ok(())` here, so 0 is not a variant...
     /// assert_eq!(Error::from_c_code(0), None);
-    /// // ...and neither is anything past the end of the C's range.
+    /// // ...and neither is -36, the code just below the end of the C's range.
+    /// // Being below that end is not on its own enough to predict `None`,
+    /// // as the `-100` case further down shows.
     /// assert_eq!(Error::from_c_code(Error::MIN_C_CODE - 1), None);
     ///
     /// // The crate's own codes sit below that range and still map, which is

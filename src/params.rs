@@ -344,13 +344,17 @@ impl Version {
 /// // have to be repeated by hand and kept in step with it.
 /// assert_eq!(validate_inputs(32, 8, 16, 0, 0, 19_456, 2, 1, 1), Ok(()));
 ///
-/// // `salt_len` and `secret_len` transposed. Both are `usize` and adjacent, so
-/// // this compiles: the 16-byte salt is now read as the secret, and the salt
-/// // length that gets checked is 0.
-/// assert_eq!(
-///     validate_inputs(32, 8, 0, 16, 0, 19_456, 2, 1, 1),
-///     Err(Error::SaltTooShort),
-/// );
+/// // `out_len` and `pwd_len` transposed, which is the pair `validate_for`
+/// // takes off the call site entirely. Both are `usize` and adjacent, so this
+/// // compiles, and there is no error to notice: the password length 8 is now
+/// // the tag length, 8 clears `MIN_OUTLEN` (4), and the call says `Ok(())`
+/// // while agreeing to a 64-bit tag.
+/// assert_eq!(validate_inputs(8, 32, 16, 0, 0, 19_456, 2, 1, 1), Ok(()));
+///
+/// // The method form cannot be told that. `out_len` is not one of its four
+/// // arguments; it comes from the `Params`, which holds it at 32.
+/// assert_eq!(params.output_len(), 32);
+/// assert_eq!(params.validate_for(32, 16, 0, 0), Ok(()));
 /// # Ok::<(), Error>(())
 /// ```
 // `MAX_TIME` is `u32::MAX`, and so is `MAX_MEMORY` on a 64-bit target, which
@@ -752,6 +756,53 @@ mod tests {
         // are constants, so a violation is a build error rather than a red test,
         // and clippy::assertions_on_constants stays quiet.
         const { assert!(MAX_DECODED_LANES < MAX_LANES) }
+    }
+
+    /// Pins the two PHC strings the docs on `MAX_DECODED_LANES` and
+    /// `MIN_DECODED_OUT_LEN` quote as evidence.
+    ///
+    /// Each of those docs tells a caller not to bounds-check decoded input
+    /// against the constant, and each backs the advice with a measured string
+    /// that breaks the constant and round-trips anyway: `p=300` against a
+    /// documented 255, and an 8-byte tag against a documented 12. The strings
+    /// were pasted in from a run of this crate and nothing recomputed them, so
+    /// a change to `encode_string`, to the tag derivation, or to what
+    /// `Params::new` does with `m_cost` would leave the docs quoting output the
+    /// crate no longer produces, with no test failing. Reproduced here from the
+    /// parameters those docs state, byte for byte, and verified back through
+    /// `verify_encoded` so the word "round-trips" is pinned too.
+    #[test]
+    fn decoded_bound_docs_quote_strings_this_crate_still_produces() {
+        use crate::Argon2;
+
+        // `MAX_DECODED_LANES` is 255 and this is `p=300`. `m=2400` is forced by
+        // `validate_inputs`' `m_cost >= 8 * lanes` rule, not by 255.
+        let params = Params::new(2400, 1, 300, 32).unwrap();
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let encoded = argon2.hash_encoded(b"password", b"somesalt").unwrap();
+        assert_eq!(
+            encoded,
+            "$argon2id$v=19$m=2400,t=1,p=300$c29tZXNhbHQ$tPLI8hre65Crk/uP5eIGCZzn3TQ7RzRoXIkGzt5jQoI"
+        );
+        assert_eq!(
+            Argon2::verify_encoded(&encoded, b"password", Algorithm::Argon2id),
+            Ok(())
+        );
+
+        // `MIN_DECODED_OUT_LEN` is 12 and this tag is 8 bytes, which `MIN_OUTLEN`
+        // (4) allows. Same `m` and salt as above so the two strings differ only
+        // where the docs say they do.
+        let params = Params::new(2400, 1, 1, 8).unwrap();
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let encoded = argon2.hash_encoded(b"password", b"somesalt").unwrap();
+        assert_eq!(
+            encoded,
+            "$argon2id$v=19$m=2400,t=1,p=1$c29tZXNhbHQ$kQGQLZpZJIk"
+        );
+        assert_eq!(
+            Argon2::verify_encoded(&encoded, b"password", Algorithm::Argon2id),
+            Ok(())
+        );
     }
 
     #[test]

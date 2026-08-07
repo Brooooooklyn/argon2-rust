@@ -17,11 +17,12 @@
 //! ```
 //! use argon2_rust::{Algorithm, Argon2, Error, Params, Version};
 //!
-//! // 64 KiB, 1 pass, 1 lane, 32-byte tag: small enough that this example
-//! // runs as a doctest rather than only being compiled. A password store
-//! // wants `Params::DEFAULT_M_COST` (19 MiB) and `Params::DEFAULT_T_COST`,
-//! // or whatever your own timing budget bought.
-//! let params = Params::new(64, 1, 1, 32)?;
+//! // `Params::default()` is m=19456 KiB (19 MiB), t=2, 1 lane, 32-byte tag:
+//! // the OWASP-style figure this crate ships as its default, and a sound
+//! // starting point for a password store. One hash of it measures about 8 ms
+//! // in a release build on an M-series laptop, cheap enough that this runs as
+//! // a real doctest. Raise `m_cost` until it fits your own timing budget.
+//! let params = Params::default();
 //! let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 //!
 //! let mut tag = [0u8; 32];
