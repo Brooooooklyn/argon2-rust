@@ -297,6 +297,62 @@ impl Version {
 /// Note the C computes `8 * context->lanes` in `uint32_t`, *before* `lanes` has
 /// been range-checked, so it can wrap. [`u32::wrapping_mul`] reproduces that:
 /// `lanes = 0xFFFF_FFFF` yields `MemoryTooLittle`, not `LanesTooMany`.
+///
+/// # Prefer [`Params::validate_for`]
+///
+/// This free function is the escape hatch, not the main path.
+/// [`Params::validate_for`] calls it with five of the nine arguments filled in
+/// from the receiver: the tag length (`out_len`, from [`Params::output_len`])
+/// and the four cost values (`m_cost`, `t_cost`, `lanes`, `threads`). It leaves
+/// the caller exactly the four buffer lengths, `pwd_len`, `salt_len`,
+/// `secret_len` and `ad_len`. Those five values come from a [`Params`] that a
+/// constructor already ran through this function, so they cannot drift from the
+/// costs the hash will actually run with, and `core` takes that route on every
+/// hash.
+///
+/// The reason to prefer the method form is the shape of this signature. The
+/// five `usize` parameters are positional and adjacent: `out_len`, `pwd_len`,
+/// `salt_len`, `secret_len` and `ad_len` form one unbroken run of a single
+/// type, so any two of them can be transposed and the code still compiles. The
+/// mistake is silent at compile time and surfaces later as the wrong error
+/// code, or as no error at all. `validate_for` takes `out_len` out of that run
+/// and pins it to the `Params`, leaving four positional lengths instead of
+/// five, and it removes the four `u32` cost arguments from the call site
+/// entirely.
+///
+/// Reach for this function directly only when the C's exact check ordering is
+/// what is wanted, which is the one thing the `Params` route cannot give you:
+/// [`Params::new`] and [`Params::new_with_threads`] validate the cost parameters
+/// at construction time, so a caller who supplies both a bad `m_cost` and a
+/// short salt sees the `m_cost` error where the C reports
+/// `ARGON2_SALT_TOO_SHORT` (the divergence note on [`Params`] spells this out).
+/// `decode_string` is the in-crate example: it calls this function directly on
+/// the decoded fields and only builds its `Params` afterwards, so that a
+/// malformed PHC string yields the same error code `validate_inputs()`
+/// (`core.c:388-513`) yields in the C.
+///
+/// ```
+/// use argon2_rust::Error;
+/// use argon2_rust::params::{Params, validate_inputs};
+///
+/// let params = Params::new(19_456, 2, 1, 32)?;
+///
+/// // Four arguments. The tag length and the four costs come from `params`.
+/// assert_eq!(params.validate_for(8, 16, 0, 0), Ok(()));
+///
+/// // The same check spelled out. The five values `params` would have supplied
+/// // have to be repeated by hand and kept in step with it.
+/// assert_eq!(validate_inputs(32, 8, 16, 0, 0, 19_456, 2, 1, 1), Ok(()));
+///
+/// // `salt_len` and `secret_len` transposed. Both are `usize` and adjacent, so
+/// // this compiles: the 16-byte salt is now read as the secret, and the salt
+/// // length that gets checked is 0.
+/// assert_eq!(
+///     validate_inputs(32, 8, 0, 16, 0, 19_456, 2, 1, 1),
+///     Err(Error::SaltTooShort),
+/// );
+/// # Ok::<(), Error>(())
+/// ```
 // `MAX_TIME` is `u32::MAX`, and so is `MAX_MEMORY` on a 64-bit target, which
 // makes those two upper-bound checks tautologically false there. They are kept
 // verbatim so the check order matches the C exactly, and because `MAX_MEMORY` is
