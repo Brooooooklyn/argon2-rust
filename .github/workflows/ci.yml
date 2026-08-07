@@ -132,7 +132,11 @@ jobs:
         run: |
           docker run --rm -v "$PWD":/w -w /w \
             quay.io/pypa/manylinux2014_x86_64 bash -euo pipefail -c '
-              ldd --version | head -1
+              # NOT `| head -1`: head exits after the first line while ldd is
+              # still writing the rest, so ldd takes a SIGPIPE, `pipefail` turns
+              # that into 141 and `-e` kills the job before curl ever runs.
+              # Measured in this image: 95 of 300 runs. `sed -n 1p` reads to EOF.
+              ldd --version | sed -n 1p
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
                 | sh -s -- -y --profile minimal --default-toolchain stable
               . "$HOME/.cargo/env"
