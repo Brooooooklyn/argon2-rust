@@ -238,6 +238,58 @@ pub const fn num_len(num: u32) -> usize {
 /// suffices. Measured on 1051 of 30000 fuzzed cases, all of them `version = 0`.
 /// [`Version`] is a closed enum of two two-digit values, so the size is always
 /// exact here — see `encode_needs_encoded_len_bytes_exactly`.)
+///
+/// # Argument order
+///
+/// `t_cost` comes before `m_cost` here, which is the reverse of
+/// [`Params::new`]:
+///
+/// ```text
+/// Params::new(m_cost, t_cost, lanes, output_len)
+/// encoded_len(algorithm, t_cost, m_cost, lanes, salt_len, hash_len)
+///                        ^^^^^^^^^^^^^^ reversed against Params::new
+/// ```
+///
+/// The order is the C's, kept so a call can be transcribed position for
+/// position: `argon2_encodedlen(t_cost, m_cost, parallelism, saltlen, hashlen,
+/// type)`, declared at `argon2.h:429` and defined at `argon2.c:447`. One
+/// argument did move. `type` went from last to first and became `algorithm`,
+/// so it sits where every other entry point in this crate takes its
+/// [`Algorithm`]. The other five kept their order among themselves;
+/// `parallelism` is spelled `lanes` here, the name [`Params`] uses for it.
+///
+/// A caller who supplies the two costs the other way round gets no error back,
+/// and the reason is arithmetic rather than luck. `t_cost` and `m_cost` reach
+/// the result through one term each, `num_len(t_cost)` and `num_len(m_cost)`,
+/// and the two terms are added: the sum of a pair of decimal digit counts does
+/// not depend on which count came from which cost. Nothing else in the body
+/// reads either value. The `m=` and `t=` fields of the string itself are
+/// written by `encode_string` out of the [`Params`] it is handed, never out of
+/// anything passed here, so a swap at this call site cannot reach the output
+/// either. That makes the equality a property of this one formula and not a
+/// rule about the crate: `encoded_len_is_symmetric_in_m_and_t` pins it at every
+/// digit-count boundary, and will fail there first if the length ever stops
+/// being a plain sum. Naming the arguments in the documented order keeps the
+/// call site readable and keeps it correct under any later formula.
+///
+/// ```
+/// use argon2_rust::{Algorithm, Params, encoded_len};
+///
+/// // Params::new takes m_cost first.
+/// let params = Params::new(65536, 3, 1, 32).unwrap();
+/// assert_eq!((params.m_cost(), params.t_cost()), (65536, 3));
+///
+/// // encoded_len takes t_cost first: the same two costs, the other way round.
+/// let n = encoded_len(
+///     Algorithm::Argon2id,
+///     params.t_cost(),
+///     params.m_cost(),
+///     params.lanes(),
+///     16, // salt_len
+///     32, // hash_len
+/// );
+/// assert_eq!(n, 98);
+/// ```
 #[must_use]
 pub fn encoded_len(
     algorithm: Algorithm,
@@ -834,6 +886,66 @@ mod tests {
             encoded_len(Algorithm::Argon2i, 2, 65536, 1, 8, 32),
             V13_ARGON2I.len() + 1
         );
+    }
+
+    /// Pins the claim in `encoded_len`'s `# Argument order` section: the C's
+    /// `argon2_encodedlen` (`argon2.c:447`) takes `t_cost` before `m_cost`,
+    /// this port keeps that order, and it is the reverse of `Params::new`. A
+    /// caller who swaps the two gets the same number, because both costs enter
+    /// the result only as `num_len(t_cost) + num_len(m_cost)` and that sum is
+    /// blind to which digit count came from which cost. If the formula ever
+    /// stops being a plain sum of the two, this fails and the doc gets fixed
+    /// with it.
+    #[test]
+    fn encoded_len_is_symmetric_in_m_and_t() {
+        // The pair the doc example uses, the C's own test vector, and the
+        // extreme: `u32::MAX` is ten digits against one, the widest the two
+        // terms can differ.
+        assert_eq!(encoded_len(Algorithm::Argon2id, 3, 65536, 1, 16, 32), 98);
+        assert_eq!(encoded_len(Algorithm::Argon2id, 65536, 3, 1, 16, 32), 98);
+        assert_eq!(encoded_len(Algorithm::Argon2id, 2, 65536, 1, 8, 32), 87);
+        assert_eq!(encoded_len(Algorithm::Argon2id, 65536, 2, 1, 8, 32), 87);
+        assert_eq!(encoded_len(Algorithm::Argon2id, 1, u32::MAX, 1, 16, 32), 103);
+        assert_eq!(encoded_len(Algorithm::Argon2id, u32::MAX, 1, 1, 16, 32), 103);
+
+        // Every place `num_len` changes answer, both sides of each step, over
+        // all three algorithm strings, so the property is pinned rather than
+        // sampled at a few lucky points.
+        const BOUNDARIES: [u32; 22] = [
+            0,
+            1,
+            9,
+            10,
+            99,
+            100,
+            999,
+            1_000,
+            9_999,
+            10_000,
+            99_999,
+            100_000,
+            999_999,
+            1_000_000,
+            9_999_999,
+            10_000_000,
+            99_999_999,
+            100_000_000,
+            999_999_999,
+            1_000_000_000,
+            65536,
+            u32::MAX,
+        ];
+        for algorithm in [Algorithm::Argon2d, Algorithm::Argon2i, Algorithm::Argon2id] {
+            for t_cost in BOUNDARIES {
+                for m_cost in BOUNDARIES {
+                    assert_eq!(
+                        encoded_len(algorithm, t_cost, m_cost, 1, 16, 32),
+                        encoded_len(algorithm, m_cost, t_cost, 1, 16, 32),
+                        "{algorithm:?} t_cost={t_cost} m_cost={m_cost}"
+                    );
+                }
+            }
+        }
     }
 
     // -- base64 -------------------------------------------------------------
