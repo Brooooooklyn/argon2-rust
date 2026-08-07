@@ -1002,6 +1002,59 @@ pub const BOUNDED_MAX_SALT_LEN: u32 = 1024;
 /// argon2.hash_into(b"password", b"somesalt", &mut tag)?;
 /// # Ok::<(), argon2_rust::Error>(())
 /// ```
+///
+/// # Two spellings
+///
+/// Every entry point here has a base name and a password-flavoured alias. The
+/// alias is a pure delegation, same function and same bytes, but the two
+/// families do not spell the *output format* the same way:
+///
+/// ```text
+///                      raw -> caller buffer   raw -> Vec   PHC -> String
+///   base:              hash_into              hash         hash_encoded
+///   password:          hash_password_into     (none)       hash_password
+///                                   ^ raw                  ^ PHC
+/// ```
+///
+/// [`Argon2::hash_password_into`] writes a **raw** tag into `out`, byte for
+/// byte what [`Argon2::hash_into`] writes. [`Argon2::hash_password`] returns a
+/// **PHC string**, character for character what [`Argon2::hash_encoded`]
+/// returns. The only difference between those two names is `_into`, which reads
+/// as a destination and not as a format; in the base family the word `encoded`
+/// carries that distinction in the name, and in the password family nothing
+/// does. Verification is the same shape: [`Argon2::verify_password`] takes a
+/// PHC string, like [`Argon2::verify_encoded`], not the raw expected tag that
+/// [`Argon2::verify`] takes.
+///
+/// There is no raw-`Vec` password spelling, which is the empty cell above. That
+/// matches the C, where no entry point allocates a raw tag for the caller:
+/// `argon2id_hash_raw` (`argon2.c:230`) writes into a buffer the caller sized.
+/// [`Argon2::hash`] is this crate's own convenience and keeps its own name.
+///
+/// The aliases exist because the C's per-algorithm entry points are named for
+/// exactly these three shapes, so that is what a caller arriving from the C
+/// looks for: `argon2id_hash_raw` (`argon2.c:230`), `argon2id_hash_encoded`
+/// (`argon2.c:219`) and `argon2id_verify` (`argon2.c:325`). They also let the
+/// call site read as "hash a password" rather than "hash some bytes".
+///
+/// ```
+/// use argon2_rust::{Algorithm, Argon2, Params, Version};
+///
+/// let params = Params::new(1 << 8, 1, 1, 32)?;
+/// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+///
+/// // `_into` picks the destination, and with it the raw format.
+/// let mut raw = [0u8; 32];
+/// argon2.hash_password_into(b"password", b"somesalt", &mut raw)?;
+///
+/// // No suffix at all, and the format changes to PHC.
+/// let phc = argon2.hash_password(b"password", b"somesalt")?;
+/// assert!(phc.starts_with("$argon2id$v=19$m=256,t=1,p=1$c29tZXNhbHQ$"));
+///
+/// // One tag underneath both: `raw` is the bytes the string base64s.
+/// assert_eq!(argon2.hash(b"password", b"somesalt")?, raw);
+/// # Ok::<(), argon2_rust::Error>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Argon2 {
     algorithm: Algorithm,
@@ -1251,11 +1304,28 @@ impl Argon2 {
     // API as "hash a password" rather than "hash some bytes"; the shorter
     // spellings stay because that is what this crate's own tests and benches
     // already call.
+    //
+    // That last half is an internal reason. The user-facing one is that these
+    // are the names a C caller already knows: the per-algorithm wrappers it
+    // links against are `argon2id_hash_raw` (argon2.c:230),
+    // `argon2id_hash_encoded` (argon2.c:219) and `argon2id_verify`
+    // (argon2.c:325), each a one-line call into `argon2_hash`/`argon2_verify`,
+    // with the raw/encoded choice made by which out-pointer is non-NULL
+    // (argon2.c:160 `if (hash)`, argon2.c:165 `if (encoded && encodedlen)`).
+    //
+    // Note what the C's names do that these do not: they carry the output
+    // format, `raw` against `encoded`. Here the only difference between
+    // `hash_password_into` and `hash_password` is `_into`, which names a
+    // destination, not a format. So the format asymmetry is stated on the type
+    // (`Argon2`'s `# Two spellings`) and again on the first line of each method
+    // below, where a reader scanning the method list will actually see it.
 
-    /// `argon2_hash()` with `hash != NULL`: derive a raw tag into `out`.
+    /// Derive a **raw** tag into `out`, not a PHC string.
     ///
-    /// The same function as [`Argon2::hash_into`]. `out.len()` must equal
-    /// [`Params::output_len`].
+    /// `argon2_hash()` with `hash != NULL` (`argon2.c:160`). The same function
+    /// as [`Argon2::hash_into`]: `_into` picks the destination, and the format
+    /// that comes with it is bytes. `out.len()` must equal
+    /// [`Params::output_len`]. For the PHC string, [`Argon2::hash_password`].
     ///
     /// # Errors
     ///
@@ -1265,14 +1335,16 @@ impl Argon2 {
         self.hash_into(pwd, salt, out)
     }
 
-    /// `argon2_hash()` with `encoded != NULL`: derive a tag and return its PHC
-    /// string.
+    /// Derive a tag and return the **PHC string** for it, not the raw bytes.
     ///
-    /// The same function as [`Argon2::hash_encoded`]. Always emits `$v=`, just
-    /// like `encode_string()` in the C, even for [`Version::V0x10`] — the
-    /// `v=0x10` reference strings in `src/test.c` predate that field, so they
-    /// have no `$v=` and are one field shorter than what this returns. Both
-    /// forms decode, see [`Argon2::verify_password`].
+    /// `argon2_hash()` with `encoded != NULL` (`argon2.c:165`). The same
+    /// function as [`Argon2::hash_encoded`]; for the raw tag, its sibling
+    /// [`Argon2::hash_password_into`] or [`Argon2::hash`].
+    ///
+    /// Always emits `$v=`, just like `encode_string()` in the C, even for
+    /// [`Version::V0x10`] — the `v=0x10` reference strings in `src/test.c`
+    /// predate that field, so they have no `$v=` and are one field shorter than
+    /// what this returns. Both forms decode, see [`Argon2::verify_password`].
     ///
     /// # Errors
     ///
@@ -1315,9 +1387,13 @@ impl Argon2 {
         self.hash_encoded(pwd, &salt)
     }
 
-    /// `argon2_verify()`: decode a PHC string and check `pwd` against it.
+    /// Check `pwd` against a **PHC string**, not against a raw tag.
     ///
-    /// The same function as [`Argon2::verify_encoded`].
+    /// `argon2_verify()` (`argon2.c:249`): decode `encoded`, then recompute and
+    /// compare. The same function as [`Argon2::verify_encoded`]. The parameters
+    /// come out of the string, so nothing on `self` is consulted, which is why
+    /// this is an associated function. To check a raw expected tag with these
+    /// parameters instead, [`Argon2::verify`].
     ///
     /// # Errors
     ///
@@ -1652,6 +1728,45 @@ fn decode_bounded(
 /// fn needs_sync<T: Sync>(_: &T) {}
 /// needs_sync(&hasher);
 /// ```
+///
+/// # Two spellings
+///
+/// Mirrored from [`Argon2`], trap included: the password-flavoured names are
+/// pure delegations, but the two families do not spell the *output format* the
+/// same way.
+///
+/// ```text
+///                      raw -> caller buffer   raw -> Vec   PHC -> String
+///   base:              hash_into              hash         hash_encoded
+///   password:          hash_password_into     (none)       hash_password
+///                                   ^ raw                  ^ PHC
+/// ```
+///
+/// [`Hasher::hash_password_into`] writes a **raw** tag into the caller's
+/// buffer, as [`Hasher::hash_into`] does. [`Hasher::hash_password`] returns a
+/// **PHC string**, as [`Hasher::hash_encoded`] does. Only `_into` separates
+/// those names, and `_into` reads as a destination rather than as a format.
+/// [`Hasher::verify_password`] likewise takes a PHC string, like
+/// [`Hasher::verify_encoded`], not the raw expected tag that [`Hasher::verify`]
+/// takes. The empty cell is real: for a raw tag as a `Vec<u8>` the only
+/// spelling is [`Hasher::hash`]. See [`Argon2`]'s section of the same name for
+/// why both families are kept.
+///
+/// ```
+/// use argon2_rust::{Algorithm, Argon2, Params, Version};
+///
+/// let params = Params::new(1 << 8, 1, 1, 32)?;
+/// let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hasher();
+///
+/// // Same prefix, same arena, different return type and different format.
+/// let mut raw = [0u8; 32];
+/// hasher.hash_password_into(b"password", b"somesalt", &mut raw)?;
+/// let phc = hasher.hash_password(b"password", b"somesalt")?;
+///
+/// assert!(phc.starts_with("$argon2id$v=19$m=256,t=1,p=1$c29tZXNhbHQ$"));
+/// assert_eq!(hasher.hash(b"password", b"somesalt")?, raw);
+/// # Ok::<(), argon2_rust::Error>(())
+/// ```
 pub struct Hasher {
     argon2: Argon2,
     workspace: Workspace,
@@ -1911,7 +2026,11 @@ impl Hasher {
     // Password-flavoured spellings, matching `Argon2`'s
     // -----------------------------------------------------------------
 
-    /// [`Argon2::hash_password_into`], reusing the arena.
+    /// Derive a **raw** tag into `out`, not a PHC string, reusing the arena.
+    ///
+    /// [`Argon2::hash_password_into`] over pooled memory, which is the same
+    /// function as [`Hasher::hash_into`]. `out.len()` must equal
+    /// [`Params::output_len`]. For the PHC string, [`Hasher::hash_password`].
     ///
     /// # Errors
     ///
@@ -1926,7 +2045,11 @@ impl Hasher {
         self.hash_into(pwd, salt, out)
     }
 
-    /// [`Argon2::hash_password`], reusing the arena.
+    /// Derive a tag and return the **PHC string** for it, reusing the arena.
+    ///
+    /// [`Argon2::hash_password`] over pooled memory, which is the same function
+    /// as [`Hasher::hash_encoded`]. For the raw tag instead, its sibling
+    /// [`Hasher::hash_password_into`] or [`Hasher::hash`].
     ///
     /// # Errors
     ///
@@ -1958,7 +2081,13 @@ impl Hasher {
         self.hash_encoded(pwd, &salt)
     }
 
-    /// [`Argon2::verify_password`], reusing the arena.
+    /// Check `pwd` against a **PHC string**, not a raw tag, reusing the arena.
+    ///
+    /// [`Argon2::verify_password`] over pooled memory, which is the same
+    /// function as [`Hasher::verify_encoded`] and inherits its pooled-arena
+    /// rule: a decoded `m_cost` above this hasher's high-water mark runs on a
+    /// private arena that is freed on the way out, so the string cannot grow
+    /// the pool. To check a raw expected tag instead, [`Hasher::verify`].
     ///
     /// # Errors
     ///
