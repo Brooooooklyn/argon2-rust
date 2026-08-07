@@ -14,15 +14,23 @@
 //!
 //! # Example
 //!
-//! ```no_run
-//! use argon2_rust::{Algorithm, Argon2, Params, Version};
+//! ```
+//! use argon2_rust::{Algorithm, Argon2, Error, Params, Version};
 //!
-//! // 64 MiB, 2 passes, 1 lane, 32-byte tag.
-//! let params = Params::new(1 << 16, 2, 1, 32)?;
+//! // 64 KiB, 1 pass, 1 lane, 32-byte tag: small enough that this example
+//! // runs as a doctest rather than only being compiled. A password store
+//! // wants `Params::DEFAULT_M_COST` (19 MiB) and `Params::DEFAULT_T_COST`,
+//! // or whatever your own timing budget bought.
+//! let params = Params::new(64, 1, 1, 32)?;
 //! let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 //!
 //! let mut tag = [0u8; 32];
 //! argon2.hash_into(b"password", b"somesalt", &mut tag)?;
+//! assert_eq!(argon2.verify(b"password", b"somesalt", &tag), Ok(()));
+//! assert_eq!(
+//!     argon2.verify(b"wrong", b"somesalt", &tag),
+//!     Err(Error::VerifyMismatch),
+//! );
 //! # Ok::<(), argon2_rust::Error>(())
 //! ```
 //!

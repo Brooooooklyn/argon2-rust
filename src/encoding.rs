@@ -290,6 +290,31 @@ pub const fn num_len(num: u32) -> usize {
 /// );
 /// assert_eq!(n, 98);
 /// ```
+///
+/// # Against a string the crate really produced
+///
+/// The value is a C buffer size, so it counts the NUL terminator described
+/// above and a Rust [`String`] is one byte shorter. That is the whole of the
+/// relationship, and it is exact rather than an upper bound - see
+/// `encode_needs_encoded_len_bytes_exactly`:
+///
+/// ```
+/// use argon2_rust::{Algorithm, Argon2, Params, Version, encoded_len};
+///
+/// let params = Params::new(64, 1, 1, 32)?;
+/// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+/// let encoded = argon2.hash_encoded(b"password", b"somesalt")?;
+///
+/// // `salt_len` is the salt's own 8 bytes, not the 11 its base64 occupies.
+/// let n = encoded_len(Algorithm::Argon2id, 1, 64, 1, 8, 32);
+/// assert_eq!(n, 84);
+/// assert_eq!(encoded.len(), n - 1);
+/// assert_eq!(
+///     encoded,
+///     "$argon2id$v=19$m=64,t=1,p=1$c29tZXNhbHQ$cpx6VEQbwTVZvcpxNIxOVUWZ5xnAipUmAe1cg2GMG70",
+/// );
+/// # Ok::<(), argon2_rust::Error>(())
+/// ```
 #[must_use]
 pub fn encoded_len(
     algorithm: Algorithm,

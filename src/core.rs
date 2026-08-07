@@ -993,13 +993,16 @@ pub const BOUNDED_MAX_SALT_LEN: u32 = 1024;
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```
 /// use argon2_rust::{Algorithm, Argon2, Params, Version};
 ///
-/// let params = Params::new(1 << 16, 2, 1, 32)?;
+/// // 64 KiB and one pass, small enough to run as a doctest. A real password
+/// // store wants `Params::DEFAULT_M_COST` and `Params::DEFAULT_T_COST`.
+/// let params = Params::new(64, 1, 1, 32)?;
 /// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 /// let mut tag = [0u8; 32];
 /// argon2.hash_into(b"password", b"somesalt", &mut tag)?;
+/// assert_eq!(argon2.verify(b"password", b"somesalt", &tag), Ok(()));
 /// # Ok::<(), argon2_rust::Error>(())
 /// ```
 ///
@@ -1134,6 +1137,33 @@ impl Argon2 {
     ///
     /// `out.len()` must equal [`Params::output_len`].
     ///
+    /// ```
+    /// use argon2_rust::{Algorithm, Argon2, Error, Params, Version};
+    ///
+    /// let params = Params::new(64, 1, 1, 32)?;
+    /// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    ///
+    /// let mut tag = [0u8; 32];
+    /// argon2.hash_into(b"password", b"somesalt", &mut tag)?;
+    ///
+    /// // Those 32 bytes are what the PHC string base64s, so pinning the string
+    /// // pins the tag without spelling out an array of hex.
+    /// assert_eq!(
+    ///     argon2.hash_encoded(b"password", b"somesalt")?,
+    ///     "$argon2id$v=19$m=64,t=1,p=1$c29tZXNhbHQ$cpx6VEQbwTVZvcpxNIxOVUWZ5xnAipUmAe1cg2GMG70",
+    /// );
+    ///
+    /// // `out.len()` is checked against `Params::output_len`, never used to
+    /// // size the tag: a buffer of the wrong length is an error, not a
+    /// // truncated hash.
+    /// let mut too_short = [0u8; 16];
+    /// assert_eq!(
+    ///     argon2.hash_into(b"password", b"somesalt", &mut too_short),
+    ///     Err(Error::OutPtrMismatch),
+    /// );
+    /// # Ok::<(), argon2_rust::Error>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// Whatever [`Params::validate_for`] returns, [`Error::OutPtrMismatch`] if
@@ -1178,6 +1208,25 @@ impl Argon2 {
 
     /// Derive a tag of [`Params::output_len`] bytes.
     ///
+    /// ```
+    /// use argon2_rust::{Algorithm, Argon2, Params, Version};
+    ///
+    /// let params = Params::new(64, 1, 1, 32)?;
+    /// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    ///
+    /// // The `Vec` is sized from the parameters, so there is no buffer to get
+    /// // wrong and no `Error::OutPtrMismatch` to handle.
+    /// let tag = argon2.hash(b"password", b"somesalt")?;
+    /// assert_eq!(tag.len(), argon2.params().output_len());
+    ///
+    /// // Byte for byte what `hash_into` writes into a buffer you own; this is
+    /// // the same function with the allocation moved inside.
+    /// let mut into = [0u8; 32];
+    /// argon2.hash_into(b"password", b"somesalt", &mut into)?;
+    /// assert_eq!(tag, into);
+    /// # Ok::<(), argon2_rust::Error>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// As [`Argon2::hash_into`].
@@ -1214,6 +1263,37 @@ impl Argon2 {
     /// A length mismatch is a [`Error::VerifyMismatch`], not a separate error:
     /// the C cannot reach that case, because `decode_string` sets
     /// `context->outlen` from the tag it just decoded.
+    ///
+    /// ```
+    /// use argon2_rust::{Algorithm, Argon2, Error, Params, Version};
+    ///
+    /// let params = Params::new(64, 1, 1, 32)?;
+    /// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    ///
+    /// // A raw tag stored earlier, alongside the salt that produced it. The
+    /// // parameters are yours to remember too, which is what the PHC string
+    /// // from `hash_encoded` saves you.
+    /// let expected = argon2.hash(b"password", b"somesalt")?;
+    /// assert_eq!(argon2.verify(b"password", b"somesalt", &expected), Ok(()));
+    ///
+    /// // Wrong password.
+    /// assert_eq!(
+    ///     argon2.verify(b"wrong", b"somesalt", &expected),
+    ///     Err(Error::VerifyMismatch),
+    /// );
+    /// // Wrong salt: the tag is a function of both.
+    /// assert_eq!(
+    ///     argon2.verify(b"password", b"othersalt", &expected),
+    ///     Err(Error::VerifyMismatch),
+    /// );
+    /// // A truncated `expected` is that same error and not a length error,
+    /// // exactly as the paragraph above says.
+    /// assert_eq!(
+    ///     argon2.verify(b"password", b"somesalt", &expected[..16]),
+    ///     Err(Error::VerifyMismatch),
+    /// );
+    /// # Ok::<(), argon2_rust::Error>(())
+    /// ```
     ///
     /// # Errors
     ///
@@ -1845,6 +1925,33 @@ impl Hasher {
 
     /// Derive a tag into `out`. [`Argon2::hash_into`], reusing the arena.
     ///
+    /// ```
+    /// use argon2_rust::{Algorithm, Argon2, Params, Version};
+    ///
+    /// let params = Params::new(64, 1, 1, 32)?;
+    /// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    /// let mut hasher = argon2.hasher();
+    ///
+    /// // `Argon2::hasher` allocates nothing; the first hash sizes the arena.
+    /// assert_eq!(hasher.reserved_blocks(), 0);
+    ///
+    /// let mut tags = Vec::new();
+    /// for pwd in [&b"first"[..], &b"second"[..]] {
+    ///     let mut tag = [0u8; 32];
+    ///     hasher.hash_into(pwd, b"somesalt", &mut tag)?;
+    ///     tags.push(tag);
+    /// }
+    ///
+    /// // Two hashes, one arena: 64 blocks of 1 KiB, the `m_cost` above. The
+    /// // second call neither allocated nor grew it.
+    /// assert_eq!(hasher.reserved_blocks(), 64);
+    /// assert_ne!(tags[0], tags[1]);
+    ///
+    /// // Reuse changes where the memory came from and nothing else.
+    /// assert_eq!(argon2.hash(b"second", b"somesalt")?, tags[1]);
+    /// # Ok::<(), argon2_rust::Error>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// As [`Argon2::hash_into`].
@@ -1916,6 +2023,36 @@ impl Hasher {
     /// The parameters come from `encoded`, **not** from this hasher — that is
     /// what verifying a stored PHC string means, and it is what lets one hasher
     /// check strings written at several different `m_cost`s.
+    ///
+    /// ```
+    /// use argon2_rust::{Algorithm, Argon2, Error, Params, Version};
+    ///
+    /// let params = Params::new(64, 1, 1, 32)?;
+    /// let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hasher();
+    ///
+    /// // Registration: one string, carrying the salt and the parameters.
+    /// let stored = hasher.hash_encoded(b"password", b"somesalt")?;
+    /// assert_eq!(
+    ///     stored,
+    ///     "$argon2id$v=19$m=64,t=1,p=1$c29tZXNhbHQ$cpx6VEQbwTVZvcpxNIxOVUWZ5xnAipUmAe1cg2GMG70",
+    /// );
+    ///
+    /// // Two logins, over the arena the registration already paid for.
+    /// assert_eq!(
+    ///     hasher.verify_encoded(&stored, b"password", Algorithm::Argon2id),
+    ///     Ok(()),
+    /// );
+    /// assert_eq!(
+    ///     hasher.verify_encoded(&stored, b"wrong", Algorithm::Argon2id),
+    ///     Err(Error::VerifyMismatch),
+    /// );
+    ///
+    /// // The string's `m=64` is not above what this hasher already holds, so
+    /// // the pool served both verifies and did not grow. See below for what
+    /// // happens when a decoded `m_cost` is larger.
+    /// assert_eq!(hasher.reserved_blocks(), 64);
+    /// # Ok::<(), argon2_rust::Error>(())
+    /// ```
     ///
     /// # The string cannot grow this hasher — but it can still be huge
     ///
@@ -2059,7 +2196,14 @@ impl Hasher {
         self.hash_encoded(pwd, salt)
     }
 
-    /// [`Argon2::hash_password_with_random_salt`], reusing the arena.
+    /// Derive a **PHC string** with a fresh salt from the OS entropy source,
+    /// reusing the arena.
+    ///
+    /// [`Argon2::hash_password_with_random_salt`] over pooled memory, which is
+    /// [`Hasher::hash_encoded`] with a [`RANDOM_SALT_LEN`]-byte salt drawn for
+    /// you and carried in the returned string. There is no raw-tag counterpart:
+    /// a caller who keeps the tag has to keep the salt too, and then generating
+    /// it here saves nothing.
     ///
     /// This is the spelling that matters for the case the type exists to serve:
     /// a long-lived per-worker hasher registering many users, where every hash

@@ -505,6 +505,34 @@ impl Params {
     /// Only `lanes` does. The effective count is `min(threads, lanes)`, see
     /// [`Params::effective_threads`].
     ///
+    /// ```
+    /// use argon2_rust::{Algorithm, Argon2, Params, Version};
+    ///
+    /// // Four lanes of work, but never more than two OS threads to run them.
+    /// let budgeted = Params::new_with_threads(64, 1, 4, 2, 32)?;
+    /// assert_eq!((budgeted.lanes(), budgeted.threads()), (4, 2));
+    /// assert_eq!(budgeted.effective_threads(), 2);
+    ///
+    /// // Asking for more threads than lanes is legal, and the extra workers
+    /// // simply have no lane to claim.
+    /// let oversubscribed = Params::new_with_threads(64, 1, 2, 8, 32)?;
+    /// assert_eq!(oversubscribed.effective_threads(), 2);
+    ///
+    /// // `Params::new` is exactly this call with `threads == lanes`.
+    /// let full = Params::new(64, 1, 4, 32)?;
+    /// assert_eq!(full, Params::new_with_threads(64, 1, 4, 4, 32)?);
+    ///
+    /// // And the knob really is free of the tag: same `lanes`, same bytes,
+    /// // whichever thread budget produced them.
+    /// let two_workers = Argon2::new(Algorithm::Argon2id, Version::V0x13, budgeted);
+    /// let four_workers = Argon2::new(Algorithm::Argon2id, Version::V0x13, full);
+    /// assert_eq!(
+    ///     two_workers.hash(b"password", b"somesalt")?,
+    ///     four_workers.hash(b"password", b"somesalt")?,
+    /// );
+    /// # Ok::<(), argon2_rust::Error>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// Any of the cost-parameter errors from [`validate_inputs`].
