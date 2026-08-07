@@ -113,10 +113,55 @@ pub const PREHASH_SEED_LENGTH: usize = 72;
 // them without checking the C grew one first.
 
 /// `ARGON2_MAX_DECODED_LANES`.
+///
+/// Mirrored from `encoding.h:22`, and **not a bound this crate enforces**. The
+/// C defines the macro there and then never reads it, in `encoding.c` or
+/// anywhere else in the tree, so `decode_string` here does not read it either.
+/// What actually bounds the `p=` field of a decoded PHC string is
+/// [`MAX_LANES`] (`0x00FF_FFFF`), applied by [`validate_inputs`] inside
+/// `decode_string`.
+///
+/// Do not use this constant to bounds-check decoded input: a well-formed
+/// string can carry a `p` far above 255 and will decode and verify. Measured
+/// against this crate, `p=300` round-trips through `hash_encoded` and
+/// `verify_encoded`:
+///
+/// ```text
+/// $argon2id$v=19$m=2400,t=1,p=300$c29tZXNhbHQ$tPLI8hre65Crk/uP5eIGCZzn3TQ7RzRoXIkGzt5jQoI
+/// ```
+///
+/// (`m=2400` because [`validate_inputs`] requires `m_cost >= 8 * lanes`, not
+/// because 255 played any part.) The `max_decoded_lanes_is_not_a_decoder_bound`
+/// test pins the gap between this value and the bound that is real.
 pub const MAX_DECODED_LANES: u32 = 255;
 /// `ARGON2_MIN_DECODED_SALT_LEN`.
+///
+/// Mirrored from `encoding.h:23`, and unread for the same reason: the C
+/// defines it and never consults it, so `decode_string` here does not either.
+/// The salt of a decoded string is bounded by [`MIN_SALT_LENGTH`], applied by
+/// [`validate_inputs`].
+///
+/// The two happen to hold the same value (8) today, which is exactly what
+/// makes this constant easy to mistake for the enforced minimum. It is not the
+/// enforced minimum, and nothing ties the two together: they come from
+/// different headers (`encoding.h` and `argon2.h`), and if [`MIN_SALT_LENGTH`]
+/// ever moves the decoder moves with it while this value stays at 8. Check
+/// decoded salts against [`MIN_SALT_LENGTH`].
 pub const MIN_DECODED_SALT_LEN: u32 = 8;
 /// `ARGON2_MIN_DECODED_OUT_LEN`.
+///
+/// Mirrored from `encoding.h:24`, and likewise never read by the C, so
+/// `decode_string` here does not read it either. The tag length of a decoded
+/// string is bounded by [`MIN_OUTLEN`], applied by [`validate_inputs`].
+///
+/// Do not use this constant to bounds-check decoded input: [`MIN_OUTLEN`] is
+/// 4, so a decoded tag can legitimately undershoot 12. Measured against this
+/// crate, an 8-byte tag round-trips through `hash_encoded` and
+/// `verify_encoded`:
+///
+/// ```text
+/// $argon2id$v=19$m=2400,t=1,p=1$c29tZXNhbHQ$kQGQLZpZJIk
+/// ```
 pub const MIN_DECODED_OUT_LEN: u32 = 12;
 
 // ---------------------------------------------------------------------------
@@ -252,6 +297,66 @@ impl Version {
 /// Note the C computes `8 * context->lanes` in `uint32_t`, *before* `lanes` has
 /// been range-checked, so it can wrap. [`u32::wrapping_mul`] reproduces that:
 /// `lanes = 0xFFFF_FFFF` yields `MemoryTooLittle`, not `LanesTooMany`.
+///
+/// # Prefer [`Params::validate_for`]
+///
+/// This free function is the escape hatch, not the main path.
+/// [`Params::validate_for`] calls it with five of the nine arguments filled in
+/// from the receiver: the tag length (`out_len`, from [`Params::output_len`])
+/// and the four cost values (`m_cost`, `t_cost`, `lanes`, `threads`). It leaves
+/// the caller exactly the four buffer lengths, `pwd_len`, `salt_len`,
+/// `secret_len` and `ad_len`. Those five values come from a [`Params`] that a
+/// constructor already ran through this function, so they cannot drift from the
+/// costs the hash will actually run with, and `core` takes that route on every
+/// hash.
+///
+/// The reason to prefer the method form is the shape of this signature. The
+/// five `usize` parameters are positional and adjacent: `out_len`, `pwd_len`,
+/// `salt_len`, `secret_len` and `ad_len` form one unbroken run of a single
+/// type, so any two of them can be transposed and the code still compiles. The
+/// mistake is silent at compile time and surfaces later as the wrong error
+/// code, or as no error at all. `validate_for` takes `out_len` out of that run
+/// and pins it to the `Params`, leaving four positional lengths instead of
+/// five, and it removes the four `u32` cost arguments from the call site
+/// entirely.
+///
+/// Reach for this function directly only when the C's exact check ordering is
+/// what is wanted, which is the one thing the `Params` route cannot give you:
+/// [`Params::new`] and [`Params::new_with_threads`] validate the cost parameters
+/// at construction time, so a caller who supplies both a bad `m_cost` and a
+/// short salt sees the `m_cost` error where the C reports
+/// `ARGON2_SALT_TOO_SHORT` (the divergence note on [`Params`] spells this out).
+/// `decode_string` is the in-crate example: it calls this function directly on
+/// the decoded fields and only builds its `Params` afterwards, so that a
+/// malformed PHC string yields the same error code `validate_inputs()`
+/// (`core.c:388-513`) yields in the C.
+///
+/// ```
+/// use argon2_rust::Error;
+/// use argon2_rust::params::{Params, validate_inputs};
+///
+/// let params = Params::new(19_456, 2, 1, 32)?;
+///
+/// // Four arguments. The tag length and the four costs come from `params`.
+/// assert_eq!(params.validate_for(8, 16, 0, 0), Ok(()));
+///
+/// // The same check spelled out. The five values `params` would have supplied
+/// // have to be repeated by hand and kept in step with it.
+/// assert_eq!(validate_inputs(32, 8, 16, 0, 0, 19_456, 2, 1, 1), Ok(()));
+///
+/// // `out_len` and `pwd_len` transposed, which is the pair `validate_for`
+/// // takes off the call site entirely. Both are `usize` and adjacent, so this
+/// // compiles, and there is no error to notice: the password length 8 is now
+/// // the tag length, 8 clears `MIN_OUTLEN` (4), and the call says `Ok(())`
+/// // while agreeing to a 64-bit tag.
+/// assert_eq!(validate_inputs(8, 32, 16, 0, 0, 19_456, 2, 1, 1), Ok(()));
+///
+/// // The method form cannot be told that. `out_len` is not one of its four
+/// // arguments; it comes from the `Params`, which holds it at 32.
+/// assert_eq!(params.output_len(), 32);
+/// assert_eq!(params.validate_for(32, 16, 0, 0), Ok(()));
+/// # Ok::<(), Error>(())
+/// ```
 // `MAX_TIME` is `u32::MAX`, and so is `MAX_MEMORY` on a 64-bit target, which
 // makes those two upper-bound checks tautologically false there. They are kept
 // verbatim so the check order matches the C exactly, and because `MAX_MEMORY` is
@@ -403,6 +508,34 @@ impl Params {
     /// `threads` is a pure performance knob: it does **not** affect the tag.
     /// Only `lanes` does. The effective count is `min(threads, lanes)`, see
     /// [`Params::effective_threads`].
+    ///
+    /// ```
+    /// use argon2_rust::{Algorithm, Argon2, Params, Version};
+    ///
+    /// // Four lanes of work, but never more than two OS threads to run them.
+    /// let budgeted = Params::new_with_threads(64, 1, 4, 2, 32)?;
+    /// assert_eq!((budgeted.lanes(), budgeted.threads()), (4, 2));
+    /// assert_eq!(budgeted.effective_threads(), 2);
+    ///
+    /// // Asking for more threads than lanes is legal, and the extra workers
+    /// // simply have no lane to claim.
+    /// let oversubscribed = Params::new_with_threads(64, 1, 2, 8, 32)?;
+    /// assert_eq!(oversubscribed.effective_threads(), 2);
+    ///
+    /// // `Params::new` is exactly this call with `threads == lanes`.
+    /// let full = Params::new(64, 1, 4, 32)?;
+    /// assert_eq!(full, Params::new_with_threads(64, 1, 4, 4, 32)?);
+    ///
+    /// // And the knob really is free of the tag: same `lanes`, same bytes,
+    /// // whichever thread budget produced them.
+    /// let two_workers = Argon2::new(Algorithm::Argon2id, Version::V0x13, budgeted);
+    /// let four_workers = Argon2::new(Algorithm::Argon2id, Version::V0x13, full);
+    /// assert_eq!(
+    ///     two_workers.hash(b"password", b"somesalt")?,
+    ///     four_workers.hash(b"password", b"somesalt")?,
+    /// );
+    /// # Ok::<(), argon2_rust::Error>(())
+    /// ```
     ///
     /// # Errors
     ///
@@ -604,6 +737,72 @@ mod tests {
         assert_eq!(HWORDS_IN_BLOCK, 32);
         assert_eq!(BITS512_WORDS_IN_BLOCK, 16);
         assert_eq!(PREHASH_SEED_LENGTH - PREHASH_DIGEST_LENGTH, 8);
+    }
+
+    #[test]
+    fn max_decoded_lanes_is_not_a_decoder_bound() {
+        // `MAX_DECODED_LANES` mirrors `encoding.h:22` and is read by nobody:
+        // not by the C, and so not by `decode_string` here either. `lanes` is
+        // bounded by `MAX_LANES` in `validate_inputs`, which is 16_777_215:
+        // roughly 65_000x this value. Measured:
+        // `$argon2id$v=19$m=2400,t=1,p=300$...` encodes and verifies, with `p`
+        // well past 255.
+        //
+        // A strict `<` is the point. If the two ever met, the doc on
+        // `MAX_DECODED_LANES` ("this is not the bound") would be false, and so
+        // would the doc's advice not to bounds-check against it.
+        //
+        // In a `const` block so the check runs at compile time: both operands
+        // are constants, so a violation is a build error rather than a red test,
+        // and clippy::assertions_on_constants stays quiet.
+        const { assert!(MAX_DECODED_LANES < MAX_LANES) }
+    }
+
+    /// Pins the two PHC strings the docs on `MAX_DECODED_LANES` and
+    /// `MIN_DECODED_OUT_LEN` quote as evidence.
+    ///
+    /// Each of those docs tells a caller not to bounds-check decoded input
+    /// against the constant, and each backs the advice with a measured string
+    /// that breaks the constant and round-trips anyway: `p=300` against a
+    /// documented 255, and an 8-byte tag against a documented 12. The strings
+    /// were pasted in from a run of this crate and nothing recomputed them, so
+    /// a change to `encode_string`, to the tag derivation, or to what
+    /// `Params::new` does with `m_cost` would leave the docs quoting output the
+    /// crate no longer produces, with no test failing. Reproduced here from the
+    /// parameters those docs state, byte for byte, and verified back through
+    /// `verify_encoded` so the word "round-trips" is pinned too.
+    #[test]
+    fn decoded_bound_docs_quote_strings_this_crate_still_produces() {
+        use crate::Argon2;
+
+        // `MAX_DECODED_LANES` is 255 and this is `p=300`. `m=2400` is forced by
+        // `validate_inputs`' `m_cost >= 8 * lanes` rule, not by 255.
+        let params = Params::new(2400, 1, 300, 32).unwrap();
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let encoded = argon2.hash_encoded(b"password", b"somesalt").unwrap();
+        assert_eq!(
+            encoded,
+            "$argon2id$v=19$m=2400,t=1,p=300$c29tZXNhbHQ$tPLI8hre65Crk/uP5eIGCZzn3TQ7RzRoXIkGzt5jQoI"
+        );
+        assert_eq!(
+            Argon2::verify_encoded(&encoded, b"password", Algorithm::Argon2id),
+            Ok(())
+        );
+
+        // `MIN_DECODED_OUT_LEN` is 12 and this tag is 8 bytes, which `MIN_OUTLEN`
+        // (4) allows. Same `m` and salt as above so the two strings differ only
+        // where the docs say they do.
+        let params = Params::new(2400, 1, 1, 8).unwrap();
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let encoded = argon2.hash_encoded(b"password", b"somesalt").unwrap();
+        assert_eq!(
+            encoded,
+            "$argon2id$v=19$m=2400,t=1,p=1$c29tZXNhbHQ$kQGQLZpZJIk"
+        );
+        assert_eq!(
+            Argon2::verify_encoded(&encoded, b"password", Algorithm::Argon2id),
+            Ok(())
+        );
     }
 
     #[test]

@@ -14,15 +14,24 @@
 //!
 //! # Example
 //!
-//! ```no_run
-//! use argon2_rust::{Algorithm, Argon2, Params, Version};
+//! ```
+//! use argon2_rust::{Algorithm, Argon2, Error, Params, Version};
 //!
-//! // 64 MiB, 2 passes, 1 lane, 32-byte tag.
-//! let params = Params::new(1 << 16, 2, 1, 32)?;
+//! // `Params::default()` is m=19456 KiB (19 MiB), t=2, 1 lane, 32-byte tag:
+//! // the OWASP-style figure this crate ships as its default, and a sound
+//! // starting point for a password store. One hash of it measures about 8 ms
+//! // in a release build on an M-series laptop, cheap enough that this runs as
+//! // a real doctest. Raise `m_cost` until it fits your own timing budget.
+//! let params = Params::default();
 //! let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 //!
 //! let mut tag = [0u8; 32];
 //! argon2.hash_into(b"password", b"somesalt", &mut tag)?;
+//! assert_eq!(argon2.verify(b"password", b"somesalt", &tag), Ok(()));
+//! assert_eq!(
+//!     argon2.verify(b"wrong", b"somesalt", &tag),
+//!     Err(Error::VerifyMismatch),
+//! );
 //! # Ok::<(), argon2_rust::Error>(())
 //! ```
 //!

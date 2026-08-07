@@ -144,6 +144,26 @@ impl Error {
     /// the C's range should bound itself with
     /// [`MIN_C_CODE`](Error::MIN_C_CODE)`..=`[`MAX_C_CODE`](Error::MAX_C_CODE)
     /// rather than assume this function rejects everything else.
+    ///
+    /// ```
+    /// use argon2_rust::Error;
+    ///
+    /// // The discriminant *is* the C code, so the pair round-trips.
+    /// assert_eq!(Error::from_c_code(-35), Some(Error::VerifyMismatch));
+    /// assert_eq!(Error::VerifyMismatch.as_c_code(), -35);
+    ///
+    /// // `ARGON2_OK` is `Ok(())` here, so 0 is not a variant...
+    /// assert_eq!(Error::from_c_code(0), None);
+    /// // ...and neither is -36, the code just below the end of the C's range.
+    /// // Being below that end is not on its own enough to predict `None`,
+    /// // as the `-100` case further down shows.
+    /// assert_eq!(Error::from_c_code(Error::MIN_C_CODE - 1), None);
+    ///
+    /// // The crate's own codes sit below that range and still map, which is
+    /// // the caveat above: `None` does not mean "outside the C's codes".
+    /// assert_eq!(Error::from_c_code(-100), Some(Error::OsRandom));
+    /// assert!(Error::OsRandom.as_c_code() < Error::MIN_C_CODE);
+    /// ```
     #[must_use]
     pub const fn from_c_code(code: i32) -> Option<Error> {
         Some(match code {
