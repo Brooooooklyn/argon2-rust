@@ -113,10 +113,55 @@ pub const PREHASH_SEED_LENGTH: usize = 72;
 // them without checking the C grew one first.
 
 /// `ARGON2_MAX_DECODED_LANES`.
+///
+/// Mirrored from `encoding.h:22`, and **not a bound this crate enforces**. The
+/// C defines the macro there and then never reads it, in `encoding.c` or
+/// anywhere else in the tree, so `decode_string` here does not read it either.
+/// What actually bounds the `p=` field of a decoded PHC string is
+/// [`MAX_LANES`] (`0x00FF_FFFF`), applied by [`validate_inputs`] inside
+/// `decode_string`.
+///
+/// Do not use this constant to bounds-check decoded input: a well-formed
+/// string can carry a `p` far above 255 and will decode and verify. Measured
+/// against this crate, `p=300` round-trips through `hash_encoded` and
+/// `verify_encoded`:
+///
+/// ```text
+/// $argon2id$v=19$m=2400,t=1,p=300$c29tZXNhbHQ$tPLI8hre65Crk/uP5eIGCZzn3TQ7RzRoXIkGzt5jQoI
+/// ```
+///
+/// (`m=2400` because [`validate_inputs`] requires `m_cost >= 8 * lanes`, not
+/// because 255 played any part.) The `max_decoded_lanes_is_not_a_decoder_bound`
+/// test pins the gap between this value and the bound that is real.
 pub const MAX_DECODED_LANES: u32 = 255;
 /// `ARGON2_MIN_DECODED_SALT_LEN`.
+///
+/// Mirrored from `encoding.h:23`, and unread for the same reason: the C
+/// defines it and never consults it, so `decode_string` here does not either.
+/// The salt of a decoded string is bounded by [`MIN_SALT_LENGTH`], applied by
+/// [`validate_inputs`].
+///
+/// The two happen to hold the same value (8) today, which is exactly what
+/// makes this constant easy to mistake for the enforced minimum. It is not the
+/// enforced minimum, and nothing ties the two together: they come from
+/// different headers (`encoding.h` and `argon2.h`), and if [`MIN_SALT_LENGTH`]
+/// ever moves the decoder moves with it while this value stays at 8. Check
+/// decoded salts against [`MIN_SALT_LENGTH`].
 pub const MIN_DECODED_SALT_LEN: u32 = 8;
 /// `ARGON2_MIN_DECODED_OUT_LEN`.
+///
+/// Mirrored from `encoding.h:24`, and likewise never read by the C, so
+/// `decode_string` here does not read it either. The tag length of a decoded
+/// string is bounded by [`MIN_OUTLEN`], applied by [`validate_inputs`].
+///
+/// Do not use this constant to bounds-check decoded input: [`MIN_OUTLEN`] is
+/// 4, so a decoded tag can legitimately undershoot 12. Measured against this
+/// crate, an 8-byte tag round-trips through `hash_encoded` and
+/// `verify_encoded`:
+///
+/// ```text
+/// $argon2id$v=19$m=2400,t=1,p=1$c29tZXNhbHQ$kQGQLZpZJIk
+/// ```
 pub const MIN_DECODED_OUT_LEN: u32 = 12;
 
 // ---------------------------------------------------------------------------
@@ -604,6 +649,25 @@ mod tests {
         assert_eq!(HWORDS_IN_BLOCK, 32);
         assert_eq!(BITS512_WORDS_IN_BLOCK, 16);
         assert_eq!(PREHASH_SEED_LENGTH - PREHASH_DIGEST_LENGTH, 8);
+    }
+
+    #[test]
+    fn max_decoded_lanes_is_not_a_decoder_bound() {
+        // `MAX_DECODED_LANES` mirrors `encoding.h:22` and is read by nobody:
+        // not by the C, and so not by `decode_string` here either. `lanes` is
+        // bounded by `MAX_LANES` in `validate_inputs`, which is 16_777_215:
+        // roughly 65_000x this value. Measured:
+        // `$argon2id$v=19$m=2400,t=1,p=300$...` encodes and verifies, with `p`
+        // well past 255.
+        //
+        // A strict `<` is the point. If the two ever met, the doc on
+        // `MAX_DECODED_LANES` ("this is not the bound") would be false, and so
+        // would the doc's advice not to bounds-check against it.
+        //
+        // In a `const` block so the check runs at compile time: both operands
+        // are constants, so a violation is a build error rather than a red test,
+        // and clippy::assertions_on_constants stays quiet.
+        const { assert!(MAX_DECODED_LANES < MAX_LANES) }
     }
 
     #[test]
