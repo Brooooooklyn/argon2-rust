@@ -23,7 +23,7 @@ jobs:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Clone phc-winner-argon2 (KAT traces + differential reference)
         run: |
@@ -66,7 +66,7 @@ jobs:
           - arch: i686
             target: i686-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -83,7 +83,7 @@ jobs:
     name: no_std build (thumbv7em-none-eabi)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv7em-none-eabi
@@ -93,7 +93,7 @@ jobs:
     name: builds where there is no entropy source
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown, wasm32-wasip1, wasm32-wasip2
@@ -115,7 +115,7 @@ jobs:
     name: link + run on glibc 2.17 (manylinux2014)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # `src/random.rs` must not name a libc symbol that only exists in newer
       # glibc. It used to declare `getrandom` directly, which glibc gained in
       # 2.25 — so this exact image failed to LINK, and the module's own
@@ -176,7 +176,7 @@ jobs:
             suites: --test kat --test vectors --test reuse --test allocation_audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Clone phc-winner-argon2 (KAT traces)
         run: |
           git clone --filter=blob:none https://github.com/P-H-C/phc-winner-argon2.git phc-winner-argon2
@@ -202,7 +202,7 @@ jobs:
     name: benches compile
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --benches --features internal-api
@@ -223,7 +223,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
@@ -249,7 +249,7 @@ jobs:
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Clone phc-winner-argon2 (KAT traces + differential reference)
         run: |
           git clone --filter=blob:none https://github.com/P-H-C/phc-winner-argon2.git phc-winner-argon2
@@ -281,7 +281,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
       - uses: taiki-e/install-action@v2
         with:
