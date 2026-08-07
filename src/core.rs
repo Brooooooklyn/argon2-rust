@@ -927,6 +927,30 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         d |= x ^ y;
     }
 
+    // The accumulator is laundered before it is tested. Nothing downstream may
+    // learn that `d` is only ever compared against zero, because a compiler
+    // that knows *that* is free to rewrite the loop above into a `bcmp` that
+    // stops at the first differing byte — which is precisely the timing leak
+    // this function exists to prevent.
+    //
+    // What this actually emits on aarch64 (`--emit=asm`, release):
+    //
+    //     LBB_2: ldrb w9,[x0],#1 ; ldrb w10,[x2],#1
+    //            eor  w9,w10,w9  ; orr  w8,w9,w8
+    //            subs x1,x1,#1   ; b.ne LBB_2      <- branch on the COUNTER
+    //            strb w8,[sp,#15]; ldrb w8,[sp,#15] <- the black_box launder
+    //            sub  w8,w8,#1   ; ubfx w0,w8,#8,#1 <- branchless verdict
+    //
+    // One branch, and it is the loop counter; no `bcmp`, no `memcmp`, nothing
+    // that depends on the bytes. The launder costs two instructions once per
+    // call.
+    //
+    // `black_box` rather than the `asm!` barrier in `memory::secure_wipe_raw`
+    // because the thing being protected is a value in a register, not a store
+    // to memory, and because it exists on every target — including wasm and
+    // under Miri, where `asm!` does not.
+    let d = core::hint::black_box(d);
+
     // argon2.c:246 `return (int)((1 & ((d - 1) >> 8)) - 1);` — 0 when `d == 0`,
     // -1 otherwise, computed without a branch. Written out rather than reduced
     // to `d == 0` so the constant-time property is on the page, not implied.
@@ -937,6 +961,29 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/// Salt length used by the `*_with_random_salt` entry points, in bytes.
+///
+/// 16 is what RFC 9106 §4 recommends for password hashing, and is comfortably
+/// above [`crate::params::MIN_SALT_LENGTH`]. It is a constant rather than an
+/// argument because a caller who wants to choose the length also wants to
+/// choose the bytes, and should call [`Argon2::hash_encoded`] with their own
+/// salt instead.
+#[cfg(feature = "std")]
+pub const RANDOM_SALT_LEN: usize = 16;
+
+/// Longest salt the `*_bounded` verify entry points will accept, in bytes.
+///
+/// [`Params`] carries no salt length, so the pre-decode size gate in
+/// [`Argon2::verify_encoded_bounded`] needs one number from somewhere. This is
+/// it: generous enough that no real producer is near it — RFC 9106 recommends
+/// 16 and [`RANDOM_SALT_LEN`] uses that — and small enough that a hostile string
+/// cannot turn the decode into an allocation worth caring about.
+///
+/// A legitimate string with a salt longer than this is rejected with
+/// [`Error::DecodingLengthFail`]; use the unbounded
+/// [`Argon2::verify_encoded`] if you genuinely have one.
+pub const BOUNDED_MAX_SALT_LEN: u32 = 1024;
 
 /// A configured Argon2 hasher.
 ///
@@ -1235,6 +1282,39 @@ impl Argon2 {
         self.hash_encoded(pwd, salt)
     }
 
+    /// Derive a PHC string with a fresh salt from the OS entropy source.
+    ///
+    /// Convenience for the common case where the caller does not manage its own
+    /// salt. The salt is [`RANDOM_SALT_LEN`] bytes — the length RFC 9106 §4
+    /// recommends — and lands in the returned string, so verification needs
+    /// nothing else kept alongside it.
+    ///
+    /// The randomness comes straight from the OS, with the entry point chosen
+    /// per platform (`getrandom(2)`, `getentropy`, `CCRandomGenerateBytes`,
+    /// `ProcessPrng`, WASI `random_get`, or `/dev/urandom`) and declared by
+    /// hand, so this costs the crate no dependency. Callers who already run
+    /// their own CSPRNG should keep passing their own salt to
+    /// [`Argon2::hash_encoded`].
+    ///
+    /// Hashing many passwords? [`Hasher::hash_password_with_random_salt`] does
+    /// this over a pooled arena.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::OsRandom`] if every OS entropy source for this platform fails,
+    /// plus the errors of [`Argon2::hash_encoded`].
+    #[cfg(feature = "std")]
+    pub fn hash_password_with_random_salt(&self, pwd: &[u8]) -> Result<String, Error> {
+        // Not wiped on the way out, deliberately, and unlike every other
+        // buffer in this file: the salt is *published* in the returned string,
+        // so scrubbing the stack copy protects nothing that is not already in
+        // the caller's hands. `clear_internal_memory` is for secret-derived
+        // material; a salt is not that.
+        let mut salt = [0u8; RANDOM_SALT_LEN];
+        crate::random::os_random(&mut salt)?;
+        self.hash_encoded(pwd, &salt)
+    }
+
     /// `argon2_verify()`: decode a PHC string and check `pwd` against it.
     ///
     /// The same function as [`Argon2::verify_encoded`].
@@ -1247,6 +1327,227 @@ impl Argon2 {
     pub fn verify_password(encoded: &str, pwd: &[u8], algorithm: Algorithm) -> Result<(), Error> {
         Argon2::verify_encoded(encoded, pwd, algorithm)
     }
+
+    /// [`Argon2::verify_encoded`], refusing costs above `ceiling` **before**
+    /// allocating anything.
+    ///
+    /// # Why this exists
+    ///
+    /// `m_cost` in a PHC string is up to ten decimal digits, and the decoder
+    /// accepts everything the C accepts — up to
+    /// [`MAX_MEMORY`](crate::params::MAX_MEMORY) KiB, which is 4 TiB. Nothing in
+    /// [`Argon2::verify_encoded`] sits between that number and the allocation,
+    /// because nothing does in `argon2_verify` either; on a login endpoint,
+    /// where the string is whatever a database row (or a request) contained,
+    /// that is a one-line denial of service. `t_cost` is the same story in CPU
+    /// time rather than bytes.
+    ///
+    /// The plain entry points keep exact C parity and are the right choice when
+    /// the string is trusted — a config file, a fixture, your own output. This
+    /// one is for when it is not.
+    ///
+    /// ```
+    /// use argon2_rust::{Algorithm, Argon2, Params, Version};
+    ///
+    /// let hostile = "$argon2id$v=19$m=4294967295,t=1,p=1$c29tZXNhbHQ$\
+    ///                CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc";
+    /// // 64 MiB, 8 passes, 4 lanes is far more than any sane stored hash.
+    /// let ceiling = Params::new(1 << 16, 8, 4, 32)?;
+    ///
+    /// let err = Argon2::verify_encoded_bounded(
+    ///     hostile, b"password", Algorithm::Argon2id, &ceiling,
+    /// ).unwrap_err();
+    /// // Rejected on the parameters, without ever asking for 4 TiB.
+    /// assert_eq!(err, argon2_rust::Error::MemoryTooMuch);
+    /// # Ok::<(), argon2_rust::Error>(())
+    /// ```
+    ///
+    /// # What is bounded
+    ///
+    /// Both the cost *and* the allocation. The length of `encoded` is checked
+    /// against the longest string `ceiling` could have produced — with
+    /// [`BOUNDED_MAX_SALT_LEN`] allowed for the salt — **before** the decoder
+    /// runs, because the decoder sizes its salt and tag buffers from the input.
+    /// Then the decoded parameters are held to all four of the ceiling's
+    /// numbers.
+    ///
+    /// # Worker threads
+    ///
+    /// `ceiling.threads()` bounds them, and it is a *fifth*, independent knob —
+    /// none of the four checks above implies it. Decoding sets `threads = lanes`
+    /// (C parity), so the string's own `p` would otherwise choose how many OS
+    /// threads this call spawns. A ceiling built with [`Params::new`] has
+    /// `threads == lanes` and so bounds them together; use
+    /// [`Params::new_with_threads`] to allow wide strings without spawning
+    /// wide:
+    ///
+    /// ```
+    /// use argon2_rust::{Params};
+    /// // Accept up to 256 lanes, but never run more than 2 workers.
+    /// let ceiling = Params::new_with_threads(1 << 16, 8, 256, 2, 32)?;
+    /// # Ok::<(), argon2_rust::Error>(())
+    /// ```
+    ///
+    /// Clamping is always safe: `threads` is a scheduling knob that cannot
+    /// change the tag — only `lanes` can — so a bounded verify accepts exactly
+    /// the same strings whatever the budget.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Argon2::verify_encoded`], plus — checked in this order,
+    /// and reusing the C's own codes rather than inventing new ones —
+    /// [`Error::DecodingLengthFail`] if `encoded` is longer than `ceiling` could
+    /// have produced, [`Error::OutputTooLong`] if the decoded tag is longer than
+    /// `ceiling.output_len()`, [`Error::MemoryTooMuch`] if the decoded `m_cost`
+    /// exceeds `ceiling.m_cost()`, [`Error::TimeTooLarge`] if `t_cost` exceeds
+    /// `ceiling.t_cost()`, and [`Error::LanesTooMany`] if `lanes` exceeds
+    /// `ceiling.lanes()`.
+    pub fn verify_encoded_bounded(
+        encoded: &str,
+        pwd: &[u8],
+        algorithm: Algorithm,
+        ceiling: &Params,
+    ) -> Result<(), Error> {
+        // argon2.c:260-262 `if (pwdlen > ARGON2_MAX_PWD_LENGTH)`.
+        if pwd.len() > MAX_PWD_LENGTH as usize {
+            return Err(Error::PwdTooLong);
+        }
+
+        let decoded = decode_bounded(encoded, algorithm, ceiling)?;
+
+        Argon2::new(decoded.algorithm, decoded.version, decoded.params).verify(
+            pwd,
+            &decoded.salt,
+            &decoded.hash,
+        )
+    }
+
+    /// [`Argon2::verify_encoded_with_ad`] with the cost ceiling of
+    /// [`Argon2::verify_encoded_bounded`].
+    ///
+    /// A keyed deployment is *more* likely to be the one parsing untrusted
+    /// strings, not less, so the bounded form exists for both.
+    ///
+    /// # Errors
+    ///
+    /// As [`Argon2::verify_encoded_bounded`], plus the secret/ad validation
+    /// errors of [`Argon2::hash_into_with_ad`].
+    pub fn verify_encoded_bounded_with_ad(
+        encoded: &str,
+        pwd: &[u8],
+        secret: &[u8],
+        ad: &[u8],
+        algorithm: Algorithm,
+        ceiling: &Params,
+    ) -> Result<(), Error> {
+        // argon2.c:260-262 `if (pwdlen > ARGON2_MAX_PWD_LENGTH)`.
+        if pwd.len() > MAX_PWD_LENGTH as usize {
+            return Err(Error::PwdTooLong);
+        }
+
+        let decoded = decode_bounded(encoded, algorithm, ceiling)?;
+
+        let argon2 = Argon2::new(decoded.algorithm, decoded.version, decoded.params);
+        let mut computed = try_zeroed_vec(argon2.params.output_len())?;
+        let result = argon2.hash_into_with_ad(pwd, &decoded.salt, secret, ad, &mut computed);
+        let matched = result.is_ok() && constant_time_eq(&computed, &decoded.hash);
+        clear_internal_memory(&mut computed);
+
+        result?;
+        if matched {
+            Ok(())
+        } else {
+            Err(Error::VerifyMismatch)
+        }
+    }
+}
+
+/// Decode `encoded` and hold it to `ceiling`, for the `*_bounded` entry points.
+///
+/// # Why the length gate comes first
+///
+/// Checking the ceiling *after* decoding is not enough, and an earlier revision
+/// of this function got that wrong. [`crate::encoding::decode_string`] sizes its
+/// salt and tag buffers from the input string, so the decode itself is an
+/// attacker-controlled allocation before any ceiling is consulted. Measured with
+/// an allocator spy against the previous version: a well-formed string with
+/// `m=8,t=1,p=1` and a 16 MiB Base64 tag peaked at **36 MiB** of live
+/// allocation, then ran a full Argon2 and a 12 MiB comparison — under a ceiling
+/// whose `output_len` was 32. Every cost was inside the ceiling; the tag was
+/// never looked at.
+///
+/// So the size of the string is checked against what the ceiling could
+/// legitimately produce *before* anything is parsed, and the decoded tag length
+/// is then checked against `ceiling.output_len()` as well. A ceiling is four
+/// numbers, and all four now mean something.
+fn decode_bounded(
+    encoded: &str,
+    algorithm: Algorithm,
+    ceiling: &Params,
+) -> Result<crate::encoding::Decoded, Error> {
+    // The longest string the ceiling could have produced. `num_len` is monotone
+    // in its argument and the costs are themselves capped below, so taking the
+    // ceiling's own values gives a true upper bound. `encoded_len` counts the
+    // C's NUL, so this is permissive by exactly one byte.
+    let max_encoded = crate::encoding::encoded_len(
+        algorithm,
+        ceiling.t_cost(),
+        ceiling.m_cost(),
+        ceiling.lanes(),
+        BOUNDED_MAX_SALT_LEN,
+        // `output_len` is bounded by MAX_OUTLEN, so this cast cannot truncate.
+        ceiling.output_len() as u32,
+    );
+    if encoded.len() > max_encoded {
+        // ARGON2_DECODING_LENGTH_FAIL: "Some of encoded parameters are too long
+        // or too short". The C defines it for exactly this and never returns it;
+        // it is the right code and it costs no new error variant.
+        return Err(Error::DecodingLengthFail);
+    }
+
+    let mut decoded = crate::encoding::decode_string(encoded, algorithm)?;
+
+    if decoded.params.output_len() > ceiling.output_len() {
+        return Err(Error::OutputTooLong);
+    }
+    if decoded.params.m_cost() > ceiling.m_cost() {
+        return Err(Error::MemoryTooMuch);
+    }
+    if decoded.params.t_cost() > ceiling.t_cost() {
+        return Err(Error::TimeTooLarge);
+    }
+    if decoded.params.lanes() > ceiling.lanes() {
+        return Err(Error::LanesTooMany);
+    }
+
+    // The four checks above do **not** imply a worker-thread bound, and the
+    // ceiling's `threads` is a separate field precisely so a caller can say
+    // "allow wide strings, but never spawn wide". `decode_string` sets
+    // `threads = lanes` (C parity, `argon2.c`), and `fill_pooled` spawns
+    // `min(threads, lanes) - 1` helpers — so without this clamp a `p=256`
+    // string inside a `lanes` ceiling of 256 spawns 255 OS threads even when
+    // the ceiling asked for one worker. That is attacker-chosen concurrency on
+    // an authentication path.
+    //
+    // Lowering `threads` is free: it is a pure scheduling knob that cannot
+    // change the tag (only `lanes` can), which `threads_do_not_change_the_tag`
+    // pins across both versions and all three algorithms.
+    //
+    // `min` with `lanes` keeps the value meaningful rather than merely legal —
+    // workers above the lane count have nothing to claim — and cannot underflow
+    // the `MIN_THREADS = 1` floor, because a validated ceiling has
+    // `threads >= 1` and a decoded string has `lanes >= 1`.
+    let threads = ceiling.threads().min(decoded.params.lanes());
+    if threads != decoded.params.threads() {
+        decoded.params = Params::new_with_threads(
+            decoded.params.m_cost(),
+            decoded.params.t_cost(),
+            decoded.params.lanes(),
+            threads,
+            decoded.params.output_len(),
+        )?;
+    }
+    Ok(decoded)
 }
 
 // ---------------------------------------------------------------------------
@@ -1501,7 +1802,15 @@ impl Hasher {
     /// what verifying a stored PHC string means, and it is what lets one hasher
     /// check strings written at several different `m_cost`s.
     ///
-    /// # The string cannot grow this hasher
+    /// # The string cannot grow this hasher — but it can still be huge
+    ///
+    /// Read this one first: what follows bounds what an untrusted `m_cost` can
+    /// **retain**, and nothing at all about what it can **allocate**. A decoded
+    /// `m_cost` of `0xFFFFFFFF` still asks for a 4 TiB arena here, exactly as it
+    /// does in [`Argon2::verify_encoded`] and exactly as it does in the C. If
+    /// `encoded` comes from anywhere an attacker can write, bound it first —
+    /// [`Hasher::verify_encoded_bounded`] does that — or the process dies on the
+    /// allocation regardless of everything below.
     ///
     /// `encoded` is untrusted input: on a login endpoint it is whatever the
     /// database row said, and a `m_cost` field is four bytes of decimal that can
@@ -1515,8 +1824,9 @@ impl Hasher {
     /// the [`params`](Hasher::params) it is configured for — is served from the
     /// pool as usual. One that would have to *grow* the pool gets a private
     /// arena instead, allocated, wiped and freed inside this call exactly as
-    /// [`Argon2::verify_encoded`] does. Verifying still works at any `m_cost`;
-    /// it just cannot leave anything behind.
+    /// [`Argon2::verify_encoded`] does. Verifying still works at any `m_cost`
+    /// the decoder accepts — including ones that will not fit in this machine.
+    /// It just cannot leave anything behind.
     ///
     /// That mirrors the C, where `finalize()` ends every `argon2_ctx` with
     /// `free_memory(...)` (`core.c:184`), so `argon2_verify` never retains an
@@ -1626,6 +1936,28 @@ impl Hasher {
         self.hash_encoded(pwd, salt)
     }
 
+    /// [`Argon2::hash_password_with_random_salt`], reusing the arena.
+    ///
+    /// This is the spelling that matters for the case the type exists to serve:
+    /// a long-lived per-worker hasher registering many users, where every hash
+    /// wants both the pooled arena *and* a fresh salt.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::OsRandom`] if every OS entropy source fails, plus the errors of
+    /// [`Hasher::hash_encoded`].
+    #[cfg(feature = "std")]
+    pub fn hash_password_with_random_salt(&mut self, pwd: &[u8]) -> Result<String, Error> {
+        // Not wiped on the way out, deliberately, and unlike every other
+        // buffer in this file: the salt is *published* in the returned string,
+        // so scrubbing the stack copy protects nothing that is not already in
+        // the caller's hands. `clear_internal_memory` is for secret-derived
+        // material; a salt is not that.
+        let mut salt = [0u8; RANDOM_SALT_LEN];
+        crate::random::os_random(&mut salt)?;
+        self.hash_encoded(pwd, &salt)
+    }
+
     /// [`Argon2::verify_password`], reusing the arena.
     ///
     /// # Errors
@@ -1639,6 +1971,86 @@ impl Hasher {
         algorithm: Algorithm,
     ) -> Result<(), Error> {
         self.verify_encoded(encoded, pwd, algorithm)
+    }
+
+    /// [`Argon2::verify_encoded_bounded`], reusing the arena.
+    ///
+    /// The ceiling is checked before anything is allocated, so it bounds the
+    /// *allocation* — which is the half [`Hasher::verify_encoded`] does not
+    /// address. Note that the pooled-arena rule still applies underneath: a
+    /// decoded `m_cost` within `ceiling` but above this hasher's own high-water
+    /// mark runs on a private arena, so passing a generous `ceiling` cannot
+    /// enlarge the pool either.
+    ///
+    /// `ceiling.threads()` bounds the worker threads exactly as it does on
+    /// [`Argon2::verify_encoded_bounded`] — worth knowing here in particular,
+    /// since a `Hasher` is what a server holds while verifying strings it did
+    /// not write, and the arena it reuses is not the only resource a wide `p`
+    /// can spend.
+    ///
+    /// # Errors
+    ///
+    /// As [`Argon2::verify_encoded_bounded`].
+    pub fn verify_encoded_bounded(
+        &mut self,
+        encoded: &str,
+        pwd: &[u8],
+        algorithm: Algorithm,
+        ceiling: &Params,
+    ) -> Result<(), Error> {
+        // argon2.c:260-262 `if (pwdlen > ARGON2_MAX_PWD_LENGTH)`.
+        if pwd.len() > MAX_PWD_LENGTH as usize {
+            return Err(Error::PwdTooLong);
+        }
+
+        let decoded = decode_bounded(encoded, algorithm, ceiling)?;
+
+        let argon2 = Argon2::new(decoded.algorithm, decoded.version, decoded.params);
+        if decoded.params.memory_blocks() as usize > self.pooled_ceiling() {
+            // As `verify_encoded`: keep an m_cost this hasher's owner never
+            // asked for off the retained arena.
+            return argon2.verify(pwd, &decoded.salt, &decoded.hash);
+        }
+        self.verify_using(&argon2, pwd, &decoded.salt, &decoded.hash)
+    }
+
+    /// [`Argon2::verify_encoded_bounded_with_ad`], reusing the arena.
+    ///
+    /// # Errors
+    ///
+    /// As [`Argon2::verify_encoded_bounded_with_ad`].
+    pub fn verify_encoded_bounded_with_ad(
+        &mut self,
+        encoded: &str,
+        pwd: &[u8],
+        secret: &[u8],
+        ad: &[u8],
+        algorithm: Algorithm,
+        ceiling: &Params,
+    ) -> Result<(), Error> {
+        // argon2.c:260-262 `if (pwdlen > ARGON2_MAX_PWD_LENGTH)`.
+        if pwd.len() > MAX_PWD_LENGTH as usize {
+            return Err(Error::PwdTooLong);
+        }
+
+        let decoded = decode_bounded(encoded, algorithm, ceiling)?;
+
+        let argon2 = Argon2::new(decoded.algorithm, decoded.version, decoded.params);
+        if decoded.params.memory_blocks() as usize > self.pooled_ceiling() {
+            // As `verify_encoded_with_ad`: an m_cost this hasher's owner never
+            // asked for runs on a one-shot arena.
+            let mut computed = try_zeroed_vec(argon2.params.output_len())?;
+            let result = argon2.hash_into_with_ad(pwd, &decoded.salt, secret, ad, &mut computed);
+            let matched = result.is_ok() && constant_time_eq(&computed, &decoded.hash);
+            clear_internal_memory(&mut computed);
+            result?;
+            return if matched {
+                Ok(())
+            } else {
+                Err(Error::VerifyMismatch)
+            };
+        }
+        self.verify_using_ad(&argon2, pwd, &decoded.salt, secret, ad, &decoded.hash)
     }
 
     // -----------------------------------------------------------------
@@ -2112,6 +2524,57 @@ pub unsafe fn hash_with_backend(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // decode_bounded — the worker-thread clamp
+    // ------------------------------------------------------------------
+
+    /// The ceiling's `threads` is an OS-thread budget that none of the four
+    /// magnitude checks implies.
+    ///
+    /// Decoding sets `threads = lanes`, and `fill_pooled` spawns
+    /// `min(threads, lanes) - 1` helpers, so a string whose `p` is *within* the
+    /// `lanes` ceiling used to hand an attacker that many OS threads on an
+    /// authentication path. Measured before the clamp: a `p=256` string against
+    /// a ceiling of `threads = 1` really did spawn 255 helpers.
+    ///
+    /// Asserted here rather than by sampling the live thread count, because the
+    /// hash is over in milliseconds and a sampler misses the peak — which is
+    /// exactly how this was nearly written off as unreproducible.
+    #[test]
+    fn decode_bounded_clamps_workers_to_the_ceilings_thread_budget() {
+        const LANES: u32 = 256;
+        let params = Params::new(8 * LANES, 1, LANES, 32).expect("params");
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let encoded = argon2.hash_encoded(b"pw", b"somesalt").expect("encode");
+
+        // "Strings this wide are allowed; spawning this wide is not."
+        let ceiling = Params::new_with_threads(8 * LANES, 1, LANES, 1, 32).expect("ceiling");
+        let decoded =
+            decode_bounded(&encoded, Algorithm::Argon2id, &ceiling).expect("within the ceiling");
+
+        assert_eq!(decoded.params.lanes(), LANES, "lanes must survive: it picks the tag");
+        assert_eq!(decoded.params.threads(), 1, "workers must obey the ceiling");
+        assert_eq!(decoded.params.effective_threads(), 1);
+    }
+
+    /// The clamp only ever lowers. A ceiling that permits more workers than the
+    /// string needs must leave the decoded value alone, so the ordinary
+    /// `Params::new` ceiling (where `threads == lanes`) keeps full parallelism.
+    #[test]
+    fn decode_bounded_leaves_workers_alone_when_the_ceiling_is_generous() {
+        let params = Params::new(1 << 10, 1, 4, 32).expect("params");
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let encoded = argon2.hash_encoded(b"pw", b"somesalt").expect("encode");
+
+        // `Params::new` sets threads = lanes = 8, i.e. more than the string's 4.
+        let ceiling = Params::new(1 << 16, 8, 8, 32).expect("ceiling");
+        let decoded =
+            decode_bounded(&encoded, Algorithm::Argon2id, &ceiling).expect("within the ceiling");
+
+        assert_eq!(decoded.params.lanes(), 4);
+        assert_eq!(decoded.params.threads(), 4, "clamped to lanes, not raised to 8");
+    }
 
     // ------------------------------------------------------------------
     // index_alpha

@@ -177,6 +177,10 @@ const WIPE_ENABLED: bool = cfg!(feature = "zeroize-memory");
 /// four, i.e. nothing, against ~60 us of scope-and-spawn. It stops saturating
 /// once the arena is bigger than L3: 256 MiB goes 10.6 → 5.3 ms on two stripes.
 /// 64 MiB is the break-even, so that is the threshold.
+///
+/// Read only from the `zeroize-memory` arm of [`Arena::wipe_visible`]; without
+/// that feature the wipe compiles to nothing and this has no reader.
+#[cfg_attr(not(feature = "zeroize-memory"), allow(dead_code))]
 const WIPE_THREAD_THRESHOLD: usize = 64 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -545,7 +549,13 @@ unsafe impl Sync for StripeBase {}
 ///
 /// `unit` keeps a stripe boundary off the middle of a page, so two workers can
 /// never fault the same page or share a cache line at the seam.
+///
+/// Its only non-test caller is the `zeroize-memory` arm of
+/// [`Arena::wipe_visible`], so without that feature the sole user is
+/// `striping_partitions_the_region_exactly` — and in a `no_std`-style build
+/// with no features at all, nothing at all.
 #[cfg(feature = "parallel")]
+#[cfg_attr(not(feature = "zeroize-memory"), allow(dead_code))]
 fn stripe_over<F>(base: *mut u8, len: usize, workers: u32, unit: usize, f: F)
 where
     F: Fn(*mut u8, usize) + Sync,
@@ -593,7 +603,10 @@ where
 }
 
 /// Single-threaded build: one stripe, no scope, no atomics.
+///
+/// Unused for the same reason as the threaded form above — see its note.
 #[cfg(not(feature = "parallel"))]
+#[cfg_attr(not(feature = "zeroize-memory"), allow(dead_code))]
 #[inline]
 fn stripe_over<F>(base: *mut u8, len: usize, _workers: u32, _unit: usize, f: F)
 where

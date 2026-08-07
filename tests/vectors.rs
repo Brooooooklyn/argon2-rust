@@ -1049,3 +1049,425 @@ fn encoded_len_is_the_c_buffer_size_including_nul() {
         "the C's argon2_encodedlen counts the NUL; a Rust String is one byte shorter"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Random-salt convenience API
+// ---------------------------------------------------------------------------
+//
+// These live here rather than in `src/random.rs`'s unit tests because the wasm
+// CI legs run named integration suites (`--test vectors`, ...) and never
+// `--lib`. Without a call from one of these, `random_get` is dead code that
+// wasm-ld drops, and the WASI arm would ship untested.
+
+/// A cheap-but-real configuration. `m_cost` is deliberately tiny: this is
+/// testing the salt source and the round trip, not the KDF.
+#[cfg(feature = "std")]
+fn rand_salt_argon2() -> Argon2 {
+    let params = Params::new(32, 1, 1, 32).expect("params");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn random_salt_round_trips_through_verify() {
+    let argon2 = rand_salt_argon2();
+    let encoded = argon2
+        .hash_password_with_random_salt(b"password")
+        .expect("the OS entropy source works");
+    Argon2::verify_encoded(&encoded, b"password", Algorithm::Argon2id)
+        .expect("a string we just produced must verify");
+    assert_eq!(
+        Argon2::verify_encoded(&encoded, b"wrong", Algorithm::Argon2id),
+        Err(Error::VerifyMismatch)
+    );
+}
+
+/// The whole point of the API: the salt is *fresh* per call. Same password,
+/// same params, different string — which can only come from the salt.
+#[cfg(feature = "std")]
+#[test]
+fn random_salt_differs_between_calls() {
+    let argon2 = rand_salt_argon2();
+    let a = argon2
+        .hash_password_with_random_salt(b"password")
+        .expect("entropy");
+    let b = argon2
+        .hash_password_with_random_salt(b"password")
+        .expect("entropy");
+    assert_ne!(a, b, "two hashes of one password shared a salt");
+}
+
+/// The decoded salt really is `RANDOM_SALT_LEN` bytes, not whatever length the
+/// base64 happened to round to.
+#[cfg(feature = "std")]
+#[test]
+fn random_salt_is_the_documented_length() {
+    let argon2 = rand_salt_argon2();
+    let encoded = argon2
+        .hash_password_with_random_salt(b"password")
+        .expect("entropy");
+    let salt_b64 = encoded.split('$').nth(4).expect("PHC has a salt field");
+    // Unpadded base64: n bytes -> ceil(4n/3) chars.
+    let expect = argon2_rust::encoded_len(
+        Algorithm::Argon2id,
+        1,
+        32,
+        1,
+        argon2_rust::RANDOM_SALT_LEN as u32,
+        32,
+    );
+    assert_eq!(
+        encoded.len() + 1,
+        expect,
+        "salt is not RANDOM_SALT_LEN bytes"
+    );
+    assert_eq!(salt_b64.len(), 22, "16 bytes is 22 unpadded base64 chars");
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn pooled_random_salt_round_trips_and_stays_fresh() {
+    let mut hasher = rand_salt_argon2().hasher();
+    let a = hasher
+        .hash_password_with_random_salt(b"password")
+        .expect("entropy");
+    let b = hasher
+        .hash_password_with_random_salt(b"password")
+        .expect("entropy");
+    assert_ne!(a, b, "the pooled path reused a salt");
+    hasher
+        .verify_encoded(&a, b"password", Algorithm::Argon2id)
+        .expect("pooled must verify what it produced");
+}
+
+// ---------------------------------------------------------------------------
+// verify_encoded_bounded
+// ---------------------------------------------------------------------------
+
+/// `m=4294967295` is a 4 TiB arena. The assertion that matters is not the error
+/// code — it is that this test *finishes*: the ceiling has to be applied while
+/// the cost is still a number, before anything is allocated.
+#[test]
+fn bounded_verify_rejects_a_hostile_cost_without_allocating() {
+    let hostile = "$argon2id$v=19$m=4294967295,t=1,p=1$c29tZXNhbHQ\
+                   $CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc";
+    let ceiling = Params::new(1 << 16, 8, 4, 32).expect("ceiling");
+    assert_eq!(
+        Argon2::verify_encoded_bounded(hostile, b"password", Algorithm::Argon2id, &ceiling),
+        Err(Error::MemoryTooMuch)
+    );
+}
+
+/// Each cost gets its own C error code, and they are checked m, t, p in order.
+#[test]
+fn bounded_verify_reports_the_c_code_for_each_cost() {
+    let ceiling = Params::new(64, 2, 1, 32).expect("ceiling");
+    let cases = [
+        ("m=4096,t=1,p=1", Error::MemoryTooMuch),
+        ("m=64,t=99,p=1", Error::TimeTooLarge),
+        ("m=64,t=1,p=4", Error::LanesTooMany),
+    ];
+    for (costs, want) in cases {
+        let encoded = format!(
+            "$argon2id$v=19${costs}$c29tZXNhbHQ\
+             $CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc"
+        );
+        assert_eq!(
+            Argon2::verify_encoded_bounded(&encoded, b"password", Algorithm::Argon2id, &ceiling),
+            Err(want),
+            "costs {costs}"
+        );
+    }
+}
+
+/// A string inside the ceiling must behave exactly like `verify_encoded` —
+/// the bound is a gate, not a different algorithm.
+#[test]
+fn bounded_verify_agrees_with_plain_verify_inside_the_ceiling() {
+    let params = Params::new(32, 1, 1, 32).expect("params");
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let encoded = argon2
+        .hash_encoded(b"password", b"somesalt")
+        .expect("encode");
+    let ceiling = Params::new(1 << 16, 8, 4, 32).expect("ceiling");
+
+    Argon2::verify_encoded_bounded(&encoded, b"password", Algorithm::Argon2id, &ceiling)
+        .expect("inside the ceiling this is just verify_encoded");
+    assert_eq!(
+        Argon2::verify_encoded_bounded(&encoded, b"wrong", Algorithm::Argon2id, &ceiling),
+        Err(Error::VerifyMismatch)
+    );
+
+    let mut hasher = argon2.hasher();
+    hasher
+        .verify_encoded_bounded(&encoded, b"password", Algorithm::Argon2id, &ceiling)
+        .expect("pooled bounded verify");
+    assert_eq!(
+        hasher.verify_encoded_bounded(&encoded, b"password", Algorithm::Argon2id, &{
+            Params::new(8, 1, 1, 32).expect("tiny ceiling")
+        }),
+        Err(Error::MemoryTooMuch),
+        "the pooled path must apply the ceiling too"
+    );
+}
+
+/// The keyed entry points get the ceiling too — a deployment using a secret is
+/// if anything *more* likely to be the one parsing untrusted strings.
+#[test]
+fn bounded_verify_with_ad_applies_the_ceiling_and_still_verifies() {
+    let (argon2, encoded) = ad_fixture();
+    let generous = Params::new(1 << 16, 8, 4, 32).expect("ceiling");
+    let stingy = Params::new(8, 1, 1, 32).expect("tiny ceiling");
+
+    Argon2::verify_encoded_bounded_with_ad(
+        &encoded,
+        AD_PWD,
+        AD_SECRET,
+        AD_AD,
+        Algorithm::Argon2id,
+        &generous,
+    )
+    .expect("inside the ceiling this is verify_encoded_with_ad");
+
+    assert_eq!(
+        Argon2::verify_encoded_bounded_with_ad(
+            &encoded,
+            AD_PWD,
+            AD_SECRET,
+            AD_AD,
+            Algorithm::Argon2id,
+            &stingy,
+        ),
+        Err(Error::MemoryTooMuch)
+    );
+
+    // A wrong secret must still be a mismatch, not a ceiling error.
+    assert_eq!(
+        Argon2::verify_encoded_bounded_with_ad(
+            &encoded,
+            AD_PWD,
+            &[0x99; 8],
+            AD_AD,
+            Algorithm::Argon2id,
+            &generous,
+        ),
+        Err(Error::VerifyMismatch)
+    );
+
+    let mut hasher = argon2.hasher();
+    hasher
+        .verify_encoded_bounded_with_ad(
+            &encoded,
+            AD_PWD,
+            AD_SECRET,
+            AD_AD,
+            Algorithm::Argon2id,
+            &generous,
+        )
+        .expect("pooled bounded verify with ad");
+    assert_eq!(
+        hasher.verify_encoded_bounded_with_ad(
+            &encoded,
+            AD_PWD,
+            AD_SECRET,
+            AD_AD,
+            Algorithm::Argon2id,
+            &stingy,
+        ),
+        Err(Error::MemoryTooMuch),
+        "the pooled keyed path must apply the ceiling too"
+    );
+}
+
+/// The hostile-cost string must be rejected on the keyed path without
+/// allocating either. As with the unkeyed case, finishing *is* the assertion.
+#[test]
+fn bounded_verify_with_ad_rejects_a_hostile_cost_without_allocating() {
+    let hostile = "$argon2id$v=19$m=4294967295,t=1,p=1$c29tZXNhbHQ\
+                   $CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc";
+    let ceiling = Params::new(1 << 16, 8, 4, 32).expect("ceiling");
+    assert_eq!(
+        Argon2::verify_encoded_bounded_with_ad(
+            hostile,
+            AD_PWD,
+            AD_SECRET,
+            AD_AD,
+            Algorithm::Argon2id,
+            &ceiling,
+        ),
+        Err(Error::MemoryTooMuch)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bounded verify: the ceiling must bound *allocation*, not just cost numbers
+// ---------------------------------------------------------------------------
+//
+// Regression tests for a real defect: `check_ceiling` once ran only after
+// `decode_string`, and only looked at m/t/p. A well-formed string with tiny
+// costs and a 16 MiB Base64 tag therefore decoded (peak 36 MiB live, measured
+// with an allocator spy), passed the ceiling, allocated a 12 MiB comparison
+// buffer and ran a full Argon2 — under a ceiling whose `output_len` was 32.
+
+/// The tag field is the lever: costs are all inside the ceiling, so nothing but
+/// a size check can stop this. Finishing quickly *is* the assertion.
+#[test]
+fn bounded_verify_rejects_an_oversized_tag_before_decoding() {
+    let huge_tag = "A".repeat(4 * 1024 * 1024);
+    let encoded = format!("$argon2id$v=19$m=8,t=1,p=1$c29tZXNhbHQ${huge_tag}");
+    let ceiling = Params::new(8, 1, 1, 32).expect("ceiling");
+    assert_eq!(
+        Argon2::verify_encoded_bounded(&encoded, b"pw", Algorithm::Argon2id, &ceiling),
+        Err(Error::DecodingLengthFail),
+        "an oversized tag must be refused on length, before the decoder allocates"
+    );
+    // Same for the keyed and pooled entry points.
+    assert_eq!(
+        Argon2::verify_encoded_bounded_with_ad(
+            &encoded,
+            b"pw",
+            &[],
+            &[],
+            Algorithm::Argon2id,
+            &ceiling
+        ),
+        Err(Error::DecodingLengthFail)
+    );
+    let mut hasher = Argon2::new(
+        Algorithm::Argon2id,
+        Version::V0x13,
+        Params::new(8, 1, 1, 32).expect("params"),
+    )
+    .hasher();
+    assert_eq!(
+        hasher.verify_encoded_bounded(&encoded, b"pw", Algorithm::Argon2id, &ceiling),
+        Err(Error::DecodingLengthFail)
+    );
+}
+
+/// An oversized *salt* is the same lever through the other field.
+#[test]
+fn bounded_verify_rejects_an_oversized_salt_before_decoding() {
+    let huge_salt = "A".repeat(4 * 1024 * 1024);
+    let encoded = format!(
+        "$argon2id$v=19$m=8,t=1,p=1${huge_salt}\
+         $CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc"
+    );
+    let ceiling = Params::new(8, 1, 1, 32).expect("ceiling");
+    assert_eq!(
+        Argon2::verify_encoded_bounded(&encoded, b"pw", Algorithm::Argon2id, &ceiling),
+        Err(Error::DecodingLengthFail)
+    );
+}
+
+/// A tag that clears the length gate but still exceeds `ceiling.output_len()`
+/// must be refused too — the ceiling is four numbers and all four count.
+#[test]
+fn bounded_verify_enforces_the_output_length_ceiling() {
+    // 64-byte tag => 86 unpadded base64 chars. Short enough to pass the size
+    // gate computed from a 1024-byte salt allowance, too long for the ceiling.
+    let params = Params::new(32, 1, 1, 64).expect("params");
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let encoded = argon2.hash_encoded(b"pw", b"somesalt").expect("encode");
+    let ceiling = Params::new(1 << 16, 8, 4, 32).expect("ceiling");
+    assert_eq!(
+        Argon2::verify_encoded_bounded(&encoded, b"pw", Algorithm::Argon2id, &ceiling),
+        Err(Error::OutputTooLong)
+    );
+    // Raise only the output ceiling and the very same string verifies.
+    let ceiling = Params::new(1 << 16, 8, 4, 64).expect("ceiling");
+    Argon2::verify_encoded_bounded(&encoded, b"pw", Algorithm::Argon2id, &ceiling)
+        .expect("inside every part of the ceiling");
+}
+
+/// A salt at the documented maximum must still be accepted — the gate is a
+/// bound, not a trap for legitimate producers.
+#[test]
+fn bounded_verify_accepts_a_salt_at_the_documented_maximum() {
+    let salt = vec![0x5Au8; argon2_rust::BOUNDED_MAX_SALT_LEN as usize];
+    let params = Params::new(32, 1, 1, 32).expect("params");
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let encoded = argon2.hash_encoded(b"pw", &salt).expect("encode");
+    let ceiling = Params::new(1 << 16, 8, 4, 32).expect("ceiling");
+    Argon2::verify_encoded_bounded(&encoded, b"pw", Algorithm::Argon2id, &ceiling)
+        .expect("a salt of exactly BOUNDED_MAX_SALT_LEN must verify");
+}
+
+/// The size gate is a budget computed by `encoded_len`, which always accounts
+/// for a `$v=` field. The decoder also accepts the pre-1.3 form that has no
+/// such field — shorter, so the budget still covers it. Pinned because a gate
+/// that ever computed a *smaller* budget than a legitimate string would turn
+/// this legacy shape into a spurious `DecodingLengthFail`.
+#[test]
+fn bounded_verify_accepts_the_legacy_form_with_no_version_field() {
+    let params = Params::new(64, 2, 1, 32).expect("params");
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x10, params);
+    let encoded = argon2
+        .hash_encoded(b"password", b"somesalt1234")
+        .expect("encode");
+    // The encoder always writes `$v=` (C parity); strip it to get the form the
+    // decoder must still accept, which defaults to V0x10.
+    let legacy = encoded.replace("$v=16", "");
+    assert!(!legacy.contains("$v="), "stripping failed: {legacy}");
+    Argon2::verify_encoded(&legacy, b"password", Algorithm::Argon2id)
+        .expect("legacy form must verify unbounded");
+    Argon2::verify_encoded_bounded(&legacy, b"password", Algorithm::Argon2id, &params)
+        .expect("legacy form must verify bounded");
+}
+
+/// A worker budget below the string's `p` must not change which strings verify.
+///
+/// This is the property that makes the clamp in `decode_bounded` safe to apply
+/// unconditionally: `threads` is a scheduling knob and only `lanes` feeds the
+/// tag, so the same string must verify identically whether it runs on one
+/// worker or on `p` of them. If that were ever false, the clamp would silently
+/// reject legitimate credentials.
+#[test]
+fn bounded_verify_is_indifferent_to_the_worker_budget() {
+    const LANES: u32 = 16;
+    let params = Params::new(8 * LANES, 2, LANES, 32).expect("params");
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let encoded = argon2
+        .hash_encoded(b"password", b"somesalt")
+        .expect("encode");
+
+    for budget in [1, 2, 3, LANES - 1, LANES] {
+        let ceiling = Params::new_with_threads(8 * LANES, 2, LANES, budget, 32).expect("ceiling");
+        Argon2::verify_encoded_bounded(&encoded, b"password", Algorithm::Argon2id, &ceiling)
+            .unwrap_or_else(|e| panic!("worker budget {budget} changed the verdict: {e:?}"));
+        // and a wrong password stays wrong at every budget
+        assert_eq!(
+            Argon2::verify_encoded_bounded(&encoded, b"wrong", Algorithm::Argon2id, &ceiling),
+            Err(Error::VerifyMismatch),
+            "worker budget {budget}"
+        );
+    }
+}
+
+/// The pooled spelling clamps too — all four bounded entry points share the
+/// same gate, and a `Hasher` is the one a server actually holds.
+#[test]
+fn pooled_bounded_verify_honours_the_worker_budget() {
+    const LANES: u32 = 16;
+    let params = Params::new(8 * LANES, 2, LANES, 32).expect("params");
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let encoded = argon2
+        .hash_encoded(b"password", b"somesalt")
+        .expect("encode");
+
+    let ceiling = Params::new_with_threads(8 * LANES, 2, LANES, 1, 32).expect("ceiling");
+    let mut hasher = argon2.hasher();
+    hasher
+        .verify_encoded_bounded(&encoded, b"password", Algorithm::Argon2id, &ceiling)
+        .expect("one worker must still verify");
+    hasher
+        .verify_encoded_bounded_with_ad(
+            &encoded,
+            b"password",
+            &[],
+            &[],
+            Algorithm::Argon2id,
+            &ceiling,
+        )
+        .expect("the _with_ad spelling shares the gate");
+}

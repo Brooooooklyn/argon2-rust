@@ -109,10 +109,52 @@
 //! # Ok::<(), argon2_rust::Error>(())
 //! ```
 //!
+//! # Salts
+//!
+//! [`Argon2::hash_password_with_random_salt`] (and the pooled
+//! [`Hasher::hash_password_with_random_salt`]) draw a [`RANDOM_SALT_LEN`]-byte
+//! salt from the OS and put it in the returned PHC string, so nothing has to be
+//! stored alongside. The entropy comes from whichever entry point is correct
+//! for the target — `getrandom(2)`, `getentropy`, `CCRandomGenerateBytes`,
+//! `ProcessPrng`, WASI `random_get`, or `/dev/urandom` — each declared by hand,
+//! so this costs no dependency. Callers who already run a CSPRNG should keep
+//! passing their own salt.
+//!
+//! # Verifying strings you did not write
+//!
+//! `m_cost` in a PHC string is up to ten digits of decimal, and
+//! [`Argon2::verify_encoded`] will honour all of them — up to
+//! [`params::MAX_MEMORY`] KiB, which is 4 TiB — because `argon2_verify` does
+//! too. That is fine for a config file and a denial of service for a login
+//! endpoint. [`Argon2::verify_encoded_bounded`] takes a ceiling and rejects an
+//! over-large cost while it is still a number, before anything is allocated:
+//!
+//! ```
+//! use argon2_rust::{Algorithm, Argon2, Error, Params};
+//!
+//! let hostile = "$argon2id$v=19$m=4294967295,t=1,p=1$c29tZXNhbHQ$\
+//!                CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc";
+//! let ceiling = Params::new(1 << 16, 8, 4, 32)?;
+//! assert_eq!(
+//!     Argon2::verify_encoded_bounded(hostile, b"pw", Algorithm::Argon2id, &ceiling),
+//!     Err(Error::MemoryTooMuch),
+//! );
+//! # Ok::<(), argon2_rust::Error>(())
+//! ```
+//!
+//! Memory is not the only resource the string spends. Decoding sets
+//! `threads = lanes` (C parity), so `p` also picks how many OS threads the
+//! verify spawns; the ceiling's own `threads` bounds that, and a ceiling from
+//! [`Params::new`] bounds it together with `lanes`. Use
+//! [`Params::new_with_threads`] to accept wide strings without spawning wide.
+//! The clamp cannot change a verdict — only `lanes` feeds the tag.
+//!
 //! # Panics
 //!
 //! Nothing reachable through the public API panics. Every failure is an
-//! [`Error`], whose numeric [`Error::as_c_code`] matches the C reference.
+//! [`Error`], whose numeric [`Error::as_c_code`] matches the C reference —
+//! except for the crate-specific codes below [`Error::MIN_C_CODE`], which the C
+//! has no equivalent for.
 
 #![no_std]
 #![warn(missing_docs)]
@@ -158,7 +200,21 @@ macro_rules! private_modules {
 
 private_modules!(blake2b, block, core, encoding, fill_block, memory);
 
-pub use crate::core::{Argon2, Hasher};
+// OS entropy for the convenience salt API; needs std for the syscall and the
+// /dev/urandom fallback. Declared per-platform inside the module.
+//
+// Deliberately not in `private_modules!`: everything here is reachable from
+// `Argon2::hash_password_with_random_salt` on every `std` build, so it needs no
+// `dead_code` allow, and should not have one hiding a future mistake.
+#[cfg(feature = "std")]
+mod random;
+
+pub use crate::core::{Argon2, BOUNDED_MAX_SALT_LEN, Hasher};
+// `RANDOM_SALT_LEN` is std-only because the API it describes is;
+// `BOUNDED_MAX_SALT_LEN` is not, because `verify_encoded_bounded` works without
+// `std` and a caller has to be able to name the bound it is being held to.
+#[cfg(feature = "std")]
+pub use crate::core::RANDOM_SALT_LEN;
 pub use crate::encoding::encoded_len;
 pub use crate::error::Error;
 pub use crate::fill_block::Backend;

@@ -21,8 +21,19 @@
 /// * [`Error::FreeMemoryCbkNull`], [`Error::AllocateMemoryCbkNull`],
 ///   [`Error::MissingArgs`] — this crate has no allocator callbacks.
 /// * [`Error::IncorrectType`] — [`crate::Algorithm`] is a closed enum.
+///
+/// # Ordering, and why this is `#[non_exhaustive]`
+///
+/// The derived [`Ord`] compares discriminants, so the C codes sort `-35 ..= -1`
+/// and any crate-specific variant sorts below all of them. That is incidental,
+/// not a guarantee — do not read meaning into the ordering.
+///
+/// [`Error::OsRandom`] is the first variant that is *not* a C code, and there
+/// may be more later. `#[non_exhaustive]` is what keeps adding one from being a
+/// breaking change for a downstream `match`; write a `_` arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(i32)]
+#[non_exhaustive]
 pub enum Error {
     /// `ARGON2_OUTPUT_PTR_NULL` (-1). Unreachable in Rust.
     OutputPtrNull = -1,
@@ -94,15 +105,27 @@ pub enum Error {
     DecodingLengthFail = -34,
     /// `ARGON2_VERIFY_MISMATCH` (-35). The password does not match the hash.
     VerifyMismatch = -35,
+    /// Not a C code: every OS entropy source failed. Crate-specific (-100),
+    /// the only variant that does not come from `argon2.h`; it exists
+    /// because the C never generates randomness and so has no code for it.
+    OsRandom = -100,
 }
 
 impl Error {
     /// The lowest C error code (`ARGON2_VERIFY_MISMATCH`).
+    ///
+    /// This bounds the codes that come from `argon2.h`, **not** the
+    /// discriminants of this enum: crate-specific variants such as
+    /// [`Error::OsRandom`] deliberately sit below it so they can never collide
+    /// with a present or future C code.
     pub const MIN_C_CODE: i32 = -35;
     /// The highest non-OK C error code (`ARGON2_OUTPUT_PTR_NULL`).
     pub const MAX_C_CODE: i32 = -1;
 
-    /// The exact numeric code the C reference returns for this condition.
+    /// The numeric code the C reference returns for this condition.
+    ///
+    /// For the crate-specific variants (see [`Error::MIN_C_CODE`]) there is no
+    /// such C code, and this returns the crate's own value instead.
     #[inline]
     #[must_use]
     pub const fn as_c_code(&self) -> i32 {
@@ -111,9 +134,16 @@ impl Error {
 
     /// Inverse of [`Error::as_c_code`].
     ///
-    /// Returns `None` for `ARGON2_OK` (0) and for any code outside
-    /// `-35..=-1`, so differential tests can turn a C return value into a
-    /// `Result<(), Error>`.
+    /// Returns `None` for `ARGON2_OK` (0) and for any code that is not a
+    /// discriminant of this enum, so differential tests can turn a C return
+    /// value into a `Result<(), Error>`.
+    ///
+    /// Every C code in `-35..=-1` maps, plus the crate-specific codes below
+    /// [`Error::MIN_C_CODE`] — currently only `-100` ([`Error::OsRandom`]),
+    /// which the C never returns. A differential test that wants *strictly*
+    /// the C's range should bound itself with
+    /// [`MIN_C_CODE`](Error::MIN_C_CODE)`..=`[`MAX_C_CODE`](Error::MAX_C_CODE)
+    /// rather than assume this function rejects everything else.
     #[must_use]
     pub const fn from_c_code(code: i32) -> Option<Error> {
         Some(match code {
@@ -152,6 +182,8 @@ impl Error {
             -33 => Error::ThreadFail,
             -34 => Error::DecodingLengthFail,
             -35 => Error::VerifyMismatch,
+            // Crate-specific (not a C code); mapped back for totality.
+            -100 => Error::OsRandom,
             _ => return None,
         })
     }
@@ -198,6 +230,8 @@ impl Error {
             Error::ThreadFail => "Threading failure",
             Error::DecodingLengthFail => "Some of encoded parameters are too long or too short",
             Error::VerifyMismatch => "The password does not match the supplied hash",
+            // Crate-specific: not a C message.
+            Error::OsRandom => "OS entropy source failed",
         }
     }
 }
@@ -230,5 +264,33 @@ mod tests {
         assert!(Error::from_c_code(0).is_none());
         assert!(Error::from_c_code(-36).is_none());
         assert!(Error::from_c_code(1).is_none());
+    }
+
+    /// Every variant whose discriminant is *not* an `argon2.h` code.
+    ///
+    /// Add to this when adding such a variant — that is what makes the test
+    /// below cover it. One entry today; it is a slice rather than a single
+    /// value so growing it stays a one-line change.
+    const CRATE_SPECIFIC: &[Error] = &[Error::OsRandom];
+
+    /// The crate-specific codes are outside `MIN_C_CODE..=MAX_C_CODE`, so the
+    /// loop above cannot reach them. They still have to round-trip, and they
+    /// still have to stay clear of the C's range.
+    #[test]
+    fn crate_specific_codes_round_trip_and_avoid_the_c_range() {
+        for &e in CRATE_SPECIFIC {
+            let code = e.as_c_code();
+            assert_eq!(
+                Error::from_c_code(code),
+                Some(e),
+                "{e:?} does not round-trip"
+            );
+            assert!(
+                code < Error::MIN_C_CODE,
+                "{e:?} ({code}) must sit below the C range so it cannot collide \
+                 with a present or future argon2.h code"
+            );
+            assert!(!e.message().is_empty());
+        }
     }
 }
