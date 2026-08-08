@@ -1,0 +1,25 @@
+argon2-rust
+===========
+
+This crate is licensed under the MIT License. See LICENSE.
+
+It is a Rust port of the Argon2 reference implementation:
+
+  Copyright 2015
+  Daniel Dinu, Dmitry Khovratovich, Jean-Philippe Aumasson, and Samuel Neves
+
+  https://github.com/P-H-C/phc-winner-argon2
+
+That work is offered under a Creative Commons CC0 1.0 License/Waiver or the
+Apache License 2.0, at the user's option. This port is made under the CC0 1.0
+option, which dedicates the reference implementation to the public domain and
+places no conditions on derivative works. CC0 requires no attribution; this
+notice records the provenance of the algorithm and the source it was ported
+from.
+
+Note that CC0 1.0 section 4(a) waives no patent or trademark rights, and the
+MIT License grants none. Users who need an express patent grant should obtain
+the reference implementation directly under its Apache-2.0 option.
+
+Argon2 was the winner of the Password Hashing Competition (2015) and is
+specified in RFC 9106.

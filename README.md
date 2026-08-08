@@ -3,7 +3,7 @@
 [![CI](https://github.com/Brooooooklyn/argon2-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/Brooooooklyn/argon2-rust/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/argon2-rust.svg)](https://crates.io/crates/argon2-rust)
 [![docs.rs](https://docs.rs/argon2-rust/badge.svg)](https://docs.rs/argon2-rust)
-[![license](https://img.shields.io/badge/license-CC0--1.0%20OR%20Apache--2.0-blue.svg)](#license)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 
 A pure-Rust port of the reference [Argon2](https://github.com/P-H-C/phc-winner-argon2)
 implementation (RFC 9106), with **runtime-dispatched SIMD** — faster than the
@@ -238,5 +238,12 @@ equality every repetition.
 
 ## License
 
-Licensed under either of [CC0-1.0](LICENSE-CC0) or
-[Apache-2.0](LICENSE-APACHE) at your option.
+Licensed under the [MIT License](LICENSE).
+
+This crate is a port of the [Argon2 reference
+implementation](https://github.com/P-H-C/phc-winner-argon2) by Daniel Dinu,
+Dmitry Khovratovich, Jean-Philippe Aumasson, and Samuel Neves, which is offered
+under CC0-1.0 or Apache-2.0 at the user's option. The port is made under the
+CC0-1.0 option — a public-domain dedication that places no conditions on
+derivative works — which is what permits this crate to be MIT-licensed. See
+[NOTICE](NOTICE).

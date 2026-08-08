@@ -89,6 +89,62 @@ jobs:
           targets: thumbv7em-none-eabi
       - run: cargo build --release --no-default-features --target thumbv7em-none-eabi
 
+  msrv:
+    # `rust-version` is a promise to downstream: Cargo hard-refuses the crate on
+    # anything older, so a number sitting above the true floor locks users out
+    # for nothing. It drifted exactly that way once — the manifest claimed 1.97
+    # while the crate built fine on 1.89 — because every other job here is
+    # `@stable` and nothing ever compiled with the *declared* toolchain.
+    #
+    # One thing sets the floor: `stdarch_x86_avx512` (the AVX-512 intrinsics and
+    # the `avx512f` target feature) stabilized in 1.89. Nothing else in the crate
+    # needs newer than 1.88. That is why the x86_64 leg is not optional —
+    # `src/fill_block/avx512.rs` is cfg'd out everywhere else, so an aarch64-only
+    # MSRV job would happily pass on 1.88 and prove nothing. The aarch64 leg is
+    # here for the NEON backend, which is cfg'd out on x86_64 for the same reason.
+    name: msrv (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-latest
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Read the floor out of the manifest instead of hardcoding it here. Two
+      # copies of a version number are two things to forget to update, and the
+      # copy that actually gates users is the manifest's.
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          v=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)
+          test -n "$v" || { echo "::error::no rust-version in Cargo.toml"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "MSRV declared in Cargo.toml: $v"
+
+      # `@master` rather than `@stable`: the version aliases are fixed refs and
+      # cannot accept a computed toolchain.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # No `--ignore-rust-version` below, deliberately: the declared value is the
+      # thing under test and that flag switches the test off.
+      #
+      # A real `build`, not just `check`, so the SIMD backends go through codegen
+      # — `#[target_feature]` and the intrinsics are where an old rustc breaks.
+      - run: cargo build --release --all-features
+
+      # `check`, not `test`: dev-dependencies are not part of the promise to
+      # downstream, so criterion raising *its* MSRV must not fail this job.
+      - run: cargo check --no-default-features
+
   entropy-target-matrix:
     name: builds where there is no entropy source
     runs-on: ubuntu-latest
