@@ -700,6 +700,25 @@ pub struct Arena {
 unsafe impl Send for Arena {}
 
 impl Arena {
+    /// Validate the size without allocating anything.
+    ///
+    /// Workspace growth calls this before releasing its existing arena, so a
+    /// request that can never have a valid allocation cannot destroy usable
+    /// memory already paid for by the caller.
+    fn checked_layout(blocks: usize) -> Result<(usize, Layout), Error> {
+        if blocks == 0 {
+            return Err(Error::MemoryAllocationError);
+        }
+
+        // Mirrors the multiplication-overflow check in `allocate_memory()`.
+        let bytes = blocks
+            .checked_mul(size_of::<Block>())
+            .ok_or(Error::MemoryAllocationError)?;
+        let layout = Layout::from_size_align(bytes, ARENA_ALIGN)
+            .map_err(|_| Error::MemoryAllocationError)?;
+        Ok((bytes, layout))
+    }
+
     /// Allocate `blocks` zeroed blocks. `capacity() == len() == blocks`.
     ///
     /// # Errors
@@ -709,24 +728,14 @@ impl Arena {
     /// the allocator returns null. The C reference reports the same code for
     /// all of these (`ARGON2_MEMORY_ALLOCATION_ERROR`).
     pub fn new(blocks: usize) -> Result<Arena, Error> {
-        // `argon2_ctx` never asks for zero blocks (memory_blocks >= MIN_MEMORY),
-        // but `alloc_zeroed` with a zero-sized layout is undefined behaviour,
-        // so reject it here.
-        if blocks == 0 {
-            return Err(Error::MemoryAllocationError);
-        }
-
-        // Mirrors the multiplication-overflow check in `allocate_memory()`.
-        let bytes = blocks
-            .checked_mul(size_of::<Block>())
-            .ok_or(Error::MemoryAllocationError)?;
+        let (_bytes, layout) = Arena::checked_layout(blocks)?;
 
         // Preferred path: a 2 MiB-aligned anonymous mapping with huge pages
         // asked for. Falls through to the heap for arenas too small to hold an
         // aligned huge page, and if the kernel refuses the mapping.
         #[cfg(all(feature = "std", target_os = "linux"))]
-        if bytes >= os::MMAP_THRESHOLD
-            && let Some((base, len)) = os::map_aligned(bytes, os::HUGE_PAGE)
+        if _bytes >= os::MMAP_THRESHOLD
+            && let Some((base, len)) = os::map_aligned(_bytes, os::HUGE_PAGE)
         {
             // SAFETY: `(base, len)` is the mapping `map_aligned` just made.
             let huge = unsafe { os::advise_huge(base, len) };
@@ -747,9 +756,6 @@ impl Arena {
                 backing: Backing::Mapped { base, len, huge },
             });
         }
-
-        let layout = Layout::from_size_align(bytes, ARENA_ALIGN)
-            .map_err(|_| Error::MemoryAllocationError)?;
 
         // SAFETY: `layout` has a non-zero size (blocks >= 1 and
         // size_of::<Block>() == 1024).
@@ -1061,7 +1067,7 @@ pub mod audit {
         RELEASED_DIRTY.with(Cell::get)
     }
 
-    /// The exact predicate [`note_release`] applies, on a live arena.
+    /// The exact predicate `note_release` applies, on a live arena.
     ///
     /// Exposed so a test can control the *predicate* separately from the
     /// *plumbing*: `released() == 1` proves `Arena::drop` calls the hook, and
@@ -1238,11 +1244,10 @@ impl Workspace {
     ///
     /// Growing **frees the old arena before allocating the new one**, so peak
     /// resident memory stays at one arena rather than two — at `m_cost = 1 GiB`
-    /// the difference is 1 GiB of RSS. The price is that a failed growth leaves
-    /// the workspace empty (the old arena is gone) and returns `Err`; the
-    /// workspace stays perfectly usable, the next acquisition just allocates
-    /// fresh. Size the workspace once with [`Workspace::with_capacity`] and the
-    /// question never arises.
+    /// the difference is 1 GiB of RSS. A size that cannot form a valid allocation
+    /// is rejected before the old arena is released. An actual allocator failure
+    /// happens after release and therefore leaves the workspace empty; it remains
+    /// usable, and the next acquisition allocates fresh.
     ///
     /// # Errors
     ///
@@ -1251,6 +1256,9 @@ impl Workspace {
         if blocks == 0 || self.capacity() >= blocks {
             return Ok(());
         }
+        // Validation needs no memory. Do it while the existing arena is still
+        // parked; only a request that could genuinely allocate may release it.
+        Arena::checked_layout(blocks)?;
         // Free first, then allocate. `Drop` wipes if the arena is not already
         // known zero, so this cannot leak the previous tenant.
         self.arena = None;
@@ -1297,6 +1305,11 @@ impl Workspace {
         if blocks == 0 {
             return Err(Error::MemoryAllocationError);
         }
+        if self.capacity() < blocks {
+            // As in `reserve`, reject deterministic size/layout failures before
+            // `take()` can remove the parked arena.
+            Arena::checked_layout(blocks)?;
+        }
         match self.arena.take() {
             // Big enough: retarget the visible window and hand it over. No
             // allocator call, and no zeroing — invariant 2 says everything
@@ -1318,10 +1331,11 @@ impl Workspace {
 
     /// Wipe `arena` and park it for the next acquisition.
     ///
-    /// The wipe is [`clear_internal_memory_blocks`] — `write_volatile` per
-    /// `u64` plus a `SeqCst` [`compiler_fence`], gated on `zeroize-memory`
-    /// exactly as [`Arena`]'s own [`Drop`] is. It covers the visible blocks,
-    /// which is precisely the window the borrower could reach.
+    /// The wipe is `Arena::wipe_visible`, gated on `zeroize-memory` exactly as
+    /// [`Arena`]'s own [`Drop`] is. It stripes large arenas across the permitted
+    /// worker count and applies [`secure_wipe_raw`] to every stripe; smaller
+    /// arenas use one stripe. It covers the visible blocks, precisely the
+    /// window the borrower could reach.
     ///
     /// If an arena is already parked, the **larger** of the two is kept and the
     /// other is freed, so a workspace never shrinks under a mixed workload.
@@ -1588,11 +1602,11 @@ mod tests {
         assert_eq!(blocks[1], Block::ZERO);
     }
 
-    /// `secure_wipe_raw` splits into a bytewise head, a `u64` body and a
-    /// bytewise tail, so it has three off-by-one opportunities. Sweep every
-    /// start alignment and length, and check the *neighbours* too — an
-    /// over-wipe is as much a bug as an under-wipe, and only the neighbour
-    /// check can catch it.
+    /// Sweep every start alignment and length through `secure_wipe_raw`, and
+    /// check the *neighbours* too. Both the bulk-zero implementation and the
+    /// byte-volatile fallback take an arbitrary pointer/length pair; an
+    /// over-wipe is as much a bug as an under-wipe, and only the neighbour check
+    /// can catch it.
     #[test]
     fn secure_wipe_raw_covers_exactly_the_requested_region() {
         const N: usize = 64;

@@ -62,11 +62,11 @@
 //!   the tag; only [`Params::lanes`] does.
 //! * `zeroize-memory` *(default)* — securely wipe internal buffers, the
 //!   equivalent of `FLAG_clear_internal_memory` in the C.
-//! * `bump-alloc` — adds `bumpalo` and gives `memory::Workspace` a reusable
-//!   bump allocator for its small scratch buffers. **Off by default**, and the
-//!   crate's only dependency of any kind. Measured worth: 17 ns per hash, which
-//!   is 0.00013% of an RFC 9106 hash. Turn it on only if you have measured your
-//!   own workload and want it.
+//! * `bump-alloc` — internal test/bench control. Together with `internal-api`,
+//!   gives `memory::Workspace` a reusable bump allocator for measuring small
+//!   scratch buffers. It does **not** change the stable hash/encode/verify paths,
+//!   which deliberately keep their `Vec`s. Measured upper bound: 17 ns per hash,
+//!   or 0.00013% of an RFC 9106 hash.
 //! * `internal-api` — exposes `__internal` for tests and benches. Not stable.
 //!
 //! The crate is `#![no_std]` and needs only `alloc`; that stays true with every
