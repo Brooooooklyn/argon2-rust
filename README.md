@@ -33,6 +33,18 @@ C reference, OpenSSL, and the popular Rust crates, on both x86-64 and aarch64.
   preview-1 `random_get`, `/dev/urandom`), each declared by hand. Targets with
   no known source return `Error::OsRandom` rather than failing the build
 
+## Security and audit status
+
+This crate implements security-sensitive cryptographic code and has **not yet
+received an independent third-party security audit**. Its differential tests,
+official test vectors, sanitizers, Miri checks, and fuzzing provide useful
+assurance, but are not a substitute for an audit. Evaluate it against your
+threat model before deploying it in security-critical systems.
+
+Please report suspected vulnerabilities privately as described in the
+[security policy](SECURITY.md). Do not disclose security-sensitive details in a
+public issue.
+
 ## Performance
 
 All numbers are wall-clock medians, interleaved rep-by-rep so machine drift
