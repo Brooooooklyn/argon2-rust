@@ -115,6 +115,12 @@ harness = false
 name = "micro"
 harness = false
 
+# Isolates the three BLAKE2b shapes Argon2 actually uses and compares every
+# executable compression backend against scalar in the same process.
+[[bench]]
+name = "blake2b"
+harness = false
+
 # Resident-set-size checks, which are a property of a *process* and therefore
 # cannot live in a libtest binary: `cargo test` runs that binary's tests
 # concurrently in one process, so `ps -o rss=` charges every sibling's
