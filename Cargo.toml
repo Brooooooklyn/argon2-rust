@@ -93,7 +93,7 @@ argon2-rust = { path = ".", default-features = false, features = ["internal-api"
 # target runs there anyway — `cargo test --target wasm32-wasip1` covers the
 # library and the integration tests, never the benches.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-codspeed-criterion-compat = { version = "5.0.1", features = ["html_reports"] }
+codspeed-criterion-compat = "5.0.1"
 criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]

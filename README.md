@@ -280,13 +280,13 @@ Every push and pull request runs `benches/codspeed.rs` under
 instrument, which counts instructions, cache accesses and branches inside a CPU
 model rather than timing a shared runner. That is a different question from the
 tables above — it is a *regression net*, not a speed claim — so the suite is
-deliberately small, single-threaded and hermetic: the cost sweep, the three
-variants, both versions, each fill backend the runner advertises, arena reuse,
-the PHC string layer, BLAKE2b, and the dispatch load.
+deliberately small, single-threaded and public-API focused: the three Argon2
+algorithms plus the one-shot and reusable-hasher hashing, keyed, encoding, and
+verification paths.
 
 ```console
 cargo codspeed build --bench codspeed
-codspeed run --mode simulation -- cargo codspeed run --bench codspeed
+cargo codspeed run --bench codspeed
 ```
 
 ## License
