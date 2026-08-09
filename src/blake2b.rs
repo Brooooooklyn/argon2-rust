@@ -18,6 +18,15 @@
 
 use crate::error::Error;
 use crate::memory::{clear_internal_memory, clear_internal_memory_u64};
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use core::sync::atomic::{AtomicU8, Ordering};
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod avx2;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod avx512;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod sse41;
 
 /// `BLAKE2B_BLOCKBYTES`.
 pub const BLOCKBYTES: usize = 128;
@@ -102,19 +111,8 @@ fn g(
     v[b] = (v[b] ^ v[c]).rotate_right(63);
 }
 
-/// `blake2b_compress()`: absorb one 128-byte block into `h`.
-///
-/// Free-standing rather than a method so the caller can pass `&mut self.h`
-/// alongside `&self.buf` — disjoint fields, no copy of the block.
-///
-/// `block` is always exactly [`BLOCKBYTES`] long; a shorter slice would read as
-/// zero-padded rather than panic.
-fn compress(h: &mut [u64; 8], t: &[u64; 2], f: &[u64; 2], block: &[u8]) {
-    let mut m = [0u64; 16];
-    for (word, chunk) in m.iter_mut().zip(block.chunks_exact(8)) {
-        *word = load64(chunk);
-    }
-
+/// Portable `blake2b_compress()`: absorb one parsed 128-byte block into `h`.
+fn compress_scalar(h: &mut [u64; 8], t: &[u64; 2], f: &[u64; 2], m: &[u64; 16]) {
     let mut v = [0u64; 16];
     v[..8].copy_from_slice(h);
     v[8] = IV[0];
@@ -127,19 +125,340 @@ fn compress(h: &mut [u64; 8], t: &[u64; 2], f: &[u64; 2], block: &[u8]) {
     v[15] = IV[7] ^ f[1];
 
     for s in &SIGMA {
-        g(&mut v, &m, s, 0, 0, 4, 8, 12);
-        g(&mut v, &m, s, 1, 1, 5, 9, 13);
-        g(&mut v, &m, s, 2, 2, 6, 10, 14);
-        g(&mut v, &m, s, 3, 3, 7, 11, 15);
-        g(&mut v, &m, s, 4, 0, 5, 10, 15);
-        g(&mut v, &m, s, 5, 1, 6, 11, 12);
-        g(&mut v, &m, s, 6, 2, 7, 8, 13);
-        g(&mut v, &m, s, 7, 3, 4, 9, 14);
+        g(&mut v, m, s, 0, 0, 4, 8, 12);
+        g(&mut v, m, s, 1, 1, 5, 9, 13);
+        g(&mut v, m, s, 2, 2, 6, 10, 14);
+        g(&mut v, m, s, 3, 3, 7, 11, 15);
+        g(&mut v, m, s, 4, 0, 5, 10, 15);
+        g(&mut v, m, s, 5, 1, 6, 11, 12);
+        g(&mut v, m, s, 6, 2, 7, 8, 13);
+        g(&mut v, m, s, 7, 3, 4, 9, 14);
     }
 
     for (i, word) in h.iter_mut().enumerate() {
         *word ^= v[i] ^ v[i + 8];
     }
+}
+
+/// The compression implementations available to BLAKE2b on this target.
+///
+/// This is deliberately separate from [`crate::fill_block::Backend`]. One
+/// BLAKE2b compression has four naturally parallel `G` functions. SSE4.1
+/// handles them as two pairs; AVX2 handles all four in one register. The
+/// AVX-512 backend requires AVX2, AVX-512F and AVX-512VL, and uses a native
+/// 256-bit rotate instead of widening into half-empty ZMM registers.
+///
+/// A two-register NEON version was also measured on Apple ARM64 and rejected:
+/// it made the 72-byte digest 16% slower and the 1 KiB expansion 26% slower
+/// than scalar. On x86, upstream's SSE4.1 schedule was retained because it
+/// made Argon2's 72-to-1024-byte expansion 15-16% faster on AMD EPYC. SSE2 and
+/// SSSE3 were rejected because they regressed longer inputs substantially.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Blake2bBackend {
+    /// Portable scalar code. Always available.
+    Scalar = 0,
+    /// x86/x86-64 SSE4.1, two 64-bit lanes per register.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    Sse41 = 1,
+    /// x86/x86-64 AVX2, four 64-bit lanes.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    Avx2 = 2,
+    /// x86/x86-64 AVX2 + AVX-512F + AVX-512VL, with native rotates.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    Avx512 = 3,
+}
+
+impl Blake2bBackend {
+    /// Every BLAKE2b backend compiled for this target.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub const ALL: &'static [Blake2bBackend] = &[
+        Blake2bBackend::Scalar,
+        Blake2bBackend::Sse41,
+        Blake2bBackend::Avx2,
+        Blake2bBackend::Avx512,
+    ];
+    /// Every BLAKE2b backend compiled for this target.
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    pub const ALL: &'static [Blake2bBackend] = &[Blake2bBackend::Scalar];
+
+    /// A short diagnostic/benchmark name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Blake2bBackend::Scalar => "scalar",
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            Blake2bBackend::Sse41 => "sse4.1",
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            Blake2bBackend::Avx2 => "avx2",
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            Blake2bBackend::Avx512 => "avx512",
+        }
+    }
+
+    /// Whether this CPU can execute the backend right now.
+    #[must_use]
+    pub fn is_available(self) -> bool {
+        match self {
+            Blake2bBackend::Scalar => true,
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            Blake2bBackend::Sse41 => have_sse41(),
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            Blake2bBackend::Avx2 => have_avx2(),
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            Blake2bBackend::Avx512 => have_avx512vl(),
+        }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    const fn from_u8(value: u8) -> Blake2bBackend {
+        match value {
+            1 => Blake2bBackend::Sse41,
+            2 => Blake2bBackend::Avx2,
+            3 => Blake2bBackend::Avx512,
+            _ => Blake2bBackend::Scalar,
+        }
+    }
+}
+
+#[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
+fn have_sse41() -> bool {
+    std::arch::is_x86_feature_detected!("sse4.1")
+}
+
+#[cfg(all(
+    not(feature = "std"),
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+fn have_sse41() -> bool {
+    cfg!(target_feature = "sse4.1")
+}
+
+/// Rosetta implements SSE4.1 correctly but made this exact compression path
+/// about twice as slow as scalar in matched-process measurements. Keep the
+/// backend executable for explicit differential tests, but do not select it
+/// automatically for translated x86-64 processes.
+#[cfg(all(feature = "std", target_arch = "x86_64", target_os = "macos"))]
+fn prefer_sse41() -> bool {
+    use core::ffi::{c_char, c_int, c_void};
+
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            oldp: *mut c_void,
+            oldlenp: *mut usize,
+            newp: *mut c_void,
+            newlen: usize,
+        ) -> c_int;
+    }
+
+    let mut translated: c_int = 0;
+    let mut translated_len = core::mem::size_of::<c_int>();
+    // SAFETY: the NUL-terminated key is static; both output pointers name a
+    // live integer and its size. An Intel Mac reports an unknown key, which is
+    // deliberately treated as "not translated".
+    let result = unsafe {
+        sysctlbyname(
+            c"sysctl.proc_translated".as_ptr(),
+            (&raw mut translated).cast(),
+            &raw mut translated_len,
+            core::ptr::null_mut(),
+            0,
+        )
+    };
+    have_sse41()
+        && !(result == 0
+            && translated_len == core::mem::size_of::<c_int>()
+            && translated == 1)
+}
+
+#[cfg(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    not(all(feature = "std", target_arch = "x86_64", target_os = "macos"))
+))]
+fn prefer_sse41() -> bool {
+    have_sse41()
+}
+
+#[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
+fn have_avx2() -> bool {
+    std::arch::is_x86_feature_detected!("avx2")
+}
+
+#[cfg(all(
+    not(feature = "std"),
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+fn have_avx2() -> bool {
+    cfg!(target_feature = "avx2")
+}
+
+#[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
+fn have_avx512vl() -> bool {
+    std::arch::is_x86_feature_detected!("avx2")
+        && std::arch::is_x86_feature_detected!("avx512f")
+        && std::arch::is_x86_feature_detected!("avx512vl")
+}
+
+#[cfg(all(
+    not(feature = "std"),
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+fn have_avx512vl() -> bool {
+    cfg!(all(
+        target_feature = "avx2",
+        target_feature = "avx512f",
+        target_feature = "avx512vl"
+    ))
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+const BACKEND_UNINIT: u8 = u8::MAX;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+static DETECTED_BACKEND: AtomicU8 = AtomicU8::new(BACKEND_UNINIT);
+
+/// Detect the fastest supported BLAKE2b compression backend without touching
+/// the process-wide cache.
+#[must_use]
+pub fn detect_blake2b_backend() -> Blake2bBackend {
+    // Miri does not implement architecture intrinsics. Its job here is to
+    // exercise the portable state machine and wiping paths.
+    #[cfg(miri)]
+    return Blake2bBackend::Scalar;
+
+    #[cfg(not(miri))]
+    {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if have_avx512vl() {
+            return Blake2bBackend::Avx512;
+        }
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if have_avx2() {
+            return Blake2bBackend::Avx2;
+        }
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if prefer_sse41() {
+            return Blake2bBackend::Sse41;
+        }
+
+        Blake2bBackend::Scalar
+    }
+}
+
+/// Detect and populate the process-wide cache. Kept off the hot path.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cold]
+#[inline(never)]
+fn detect_and_cache_blake2b_backend() -> Blake2bBackend {
+    let detected = detect_blake2b_backend();
+    // Relaxed is sufficient: this publishes one plain value with no associated
+    // data, and concurrent detection always computes the same result.
+    DETECTED_BACKEND.store(detected as u8, Ordering::Relaxed);
+    detected
+}
+
+/// The cached BLAKE2b backend used by newly-created states.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[inline]
+#[must_use]
+pub fn blake2b_backend() -> Blake2bBackend {
+    let cached = DETECTED_BACKEND.load(Ordering::Relaxed);
+    if cached == BACKEND_UNINIT {
+        detect_and_cache_blake2b_backend()
+    } else {
+        Blake2bBackend::from_u8(cached)
+    }
+}
+
+/// The portable backend used on targets with no accelerated implementation.
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+#[inline]
+#[must_use]
+pub const fn blake2b_backend() -> Blake2bBackend {
+    Blake2bBackend::Scalar
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+type CompressFn = unsafe fn(&mut [u64; 8], &[u64; 2], &[u64; 2], &[u64; 16]);
+
+// A zero-sized choice preserves the old direct scalar call on targets where
+// this module has no accelerated backend. In particular, ARM must not pay an
+// indirect call for an x86-only optimization.
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+#[derive(Copy, Clone)]
+struct ScalarCompress;
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+type CompressFn = ScalarCompress;
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+unsafe fn compress_scalar_backend(
+    h: &mut [u64; 8],
+    t: &[u64; 2],
+    f: &[u64; 2],
+    m: &[u64; 16],
+) {
+    compress_scalar(h, t, f, m);
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn compress_fn(backend: Blake2bBackend) -> CompressFn {
+    match backend {
+        Blake2bBackend::Scalar => compress_scalar_backend,
+        Blake2bBackend::Sse41 => sse41::compress,
+        Blake2bBackend::Avx2 => avx2::compress,
+        Blake2bBackend::Avx512 => avx512::compress,
+    }
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+fn compress_fn(_backend: Blake2bBackend) -> CompressFn {
+    ScalarCompress
+}
+
+/// Compress one parsed block using a backend already proved available.
+unsafe fn compress_parsed_with(
+    compress: CompressFn,
+    h: &mut [u64; 8],
+    t: &[u64; 2],
+    f: &[u64; 2],
+    m: &[u64; 16],
+) {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        // SAFETY: transferred from this function's caller.
+        unsafe { compress(h, t, f, m) };
+    }
+
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        let ScalarCompress = compress;
+        compress_scalar(h, t, f, m);
+    }
+}
+
+/// Parse and compress one block using a backend already proved available.
+///
+/// Free-standing so the caller can pass `&mut self.h` alongside `&self.buf` as
+/// disjoint fields, without copying the block.
+fn compress_with(
+    compress: CompressFn,
+    h: &mut [u64; 8],
+    t: &[u64; 2],
+    f: &[u64; 2],
+    block: &[u8],
+) {
+    let mut m = [0u64; 16];
+    for (word, chunk) in m.iter_mut().zip(block.chunks_exact(8)) {
+        *word = load64(chunk);
+    }
+
+    // SAFETY: the function pointer enters a state only through `init_param`,
+    // whose automatic path calls `detect_blake2b_backend`. The explicit
+    // internal test/benchmark path is unsafe and transfers that proof to its
+    // caller. `m` has exactly sixteen words.
+    unsafe { compress_parsed_with(compress, h, t, f, &m) };
 }
 
 /// A streaming BLAKE2b state (`blake2b_state`).
@@ -161,6 +480,8 @@ pub struct Blake2b {
     /// state to zero and nothing in this crate turns it on — but it is kept so
     /// `set_lastblock` mirrors the C.
     last_node: bool,
+    /// Resolved once when the state is created, not once per compressed block.
+    compress: CompressFn,
 }
 
 impl Blake2b {
@@ -172,7 +493,23 @@ impl Blake2b {
     /// [`Error::IncorrectParameter`] if `outlen` is 0 or greater than
     /// [`OUTBYTES`] (the C returns -1 for both).
     pub fn new(outlen: usize) -> Result<Blake2b, Error> {
-        Blake2b::init_param(outlen, 0)
+        Blake2b::init_param(outlen, 0, blake2b_backend())
+    }
+
+    /// Construct a state with an explicitly selected compression backend.
+    ///
+    /// This is an unstable test/benchmark hook. Normal callers must use
+    /// [`Blake2b::new`], which performs safe runtime detection.
+    ///
+    /// # Safety
+    ///
+    /// `backend` must be executable on the current CPU, as reported by
+    /// [`Blake2bBackend::is_available`].
+    pub unsafe fn new_with_backend(
+        outlen: usize,
+        backend: Blake2bBackend,
+    ) -> Result<Blake2b, Error> {
+        Blake2b::init_param(outlen, 0, backend)
     }
 
     /// `blake2b_init_key(S, outlen, key, keylen)`.
@@ -193,7 +530,7 @@ impl Blake2b {
             return Err(Error::IncorrectParameter);
         }
 
-        let mut state = Blake2b::init_param(outlen, key.len())?;
+        let mut state = Blake2b::init_param(outlen, key.len(), blake2b_backend())?;
 
         // The key is absorbed as one zero-padded 128-byte block.
         let mut block = [0u8; BLOCKBYTES];
@@ -218,7 +555,11 @@ impl Blake2b {
     ///                              32..48  salt         (0)
     ///                              48..64  personal     (0)
     /// ```
-    fn init_param(outlen: usize, keylen: usize) -> Result<Blake2b, Error> {
+    fn init_param(
+        outlen: usize,
+        keylen: usize,
+        backend: Blake2bBackend,
+    ) -> Result<Blake2b, Error> {
         if outlen == 0 || outlen > OUTBYTES {
             return Err(Error::IncorrectParameter);
         }
@@ -247,6 +588,7 @@ impl Blake2b {
             buflen: 0,
             outlen,
             last_node: false,
+            compress: compress_fn(backend),
         })
     }
 
@@ -291,7 +633,7 @@ impl Blake2b {
             let fill = BLOCKBYTES - left;
             self.buf[left..].copy_from_slice(&pin[..fill]);
             self.increment_counter(BLOCKBYTES as u64);
-            compress(&mut self.h, &self.t, &self.f, &self.buf);
+            compress_with(self.compress, &mut self.h, &self.t, &self.f, &self.buf);
             self.buflen = 0;
             pin = &pin[fill..];
 
@@ -300,7 +642,7 @@ impl Blake2b {
                 // In range: the loop guard just proved `pin.len() > BLOCKBYTES`.
                 let (block, rest) = pin.split_at(BLOCKBYTES);
                 self.increment_counter(BLOCKBYTES as u64);
-                compress(&mut self.h, &self.t, &self.f, block);
+                compress_with(self.compress, &mut self.h, &self.t, &self.f, block);
                 pin = rest;
             }
         }
@@ -337,7 +679,7 @@ impl Blake2b {
         for byte in &mut self.buf[self.buflen..] {
             *byte = 0;
         }
-        compress(&mut self.h, &self.t, &self.f, &self.buf);
+        compress_with(self.compress, &mut self.h, &self.t, &self.f, &self.buf);
 
         let mut buffer = [0u8; OUTBYTES];
         for (chunk, word) in buffer.chunks_exact_mut(8).zip(self.h.iter()) {
@@ -371,7 +713,26 @@ impl Drop for Blake2b {
 ///
 /// [`Error::IncorrectParameter`] if `out.len()` is 0 or greater than [`OUTBYTES`].
 pub fn blake2b(out: &mut [u8], input: &[u8]) -> Result<(), Error> {
-    let mut state = Blake2b::new(out.len())?;
+    let backend = blake2b_backend();
+    // SAFETY: `blake2b_backend` only returns a backend available on this CPU.
+    unsafe { blake2b_with_backend(out, input, backend) }
+}
+
+/// One-shot BLAKE2b with an explicitly selected compression backend.
+///
+/// This is an unstable test/benchmark hook.
+///
+/// # Safety
+///
+/// `backend` must be executable on the current CPU, as reported by
+/// [`Blake2bBackend::is_available`].
+pub unsafe fn blake2b_with_backend(
+    out: &mut [u8],
+    input: &[u8],
+    backend: Blake2bBackend,
+) -> Result<(), Error> {
+    // SAFETY: transferred from this function's caller.
+    let mut state = unsafe { Blake2b::new_with_backend(out.len(), backend)? };
     state.update(input);
     state.finalize(out)
 }
@@ -395,6 +756,25 @@ pub fn blake2b(out: &mut [u8], input: &[u8]) -> Result<(), Error> {
 /// rejects a zero digest length) or longer than
 /// [`crate::params::MAX_OUTLEN`] (the C's `outlen > UINT32_MAX`).
 pub fn blake2b_long(out: &mut [u8], input: &[u8]) -> Result<(), Error> {
+    let backend = blake2b_backend();
+    // SAFETY: `blake2b_backend` only returns a backend available on this CPU.
+    unsafe { blake2b_long_with_backend(out, input, backend) }
+}
+
+/// Argon2's variable-length BLAKE2b extension with an explicitly selected
+/// compression backend.
+///
+/// This is an unstable test/benchmark hook.
+///
+/// # Safety
+///
+/// `backend` must be executable on the current CPU, as reported by
+/// [`Blake2bBackend::is_available`].
+pub unsafe fn blake2b_long_with_backend(
+    out: &mut [u8],
+    input: &[u8],
+    backend: Blake2bBackend,
+) -> Result<(), Error> {
     // `if (outlen > UINT32_MAX) goto fail;`
     let Ok(outlen) = u32::try_from(out.len()) else {
         return Err(Error::IncorrectParameter);
@@ -403,7 +783,8 @@ pub fn blake2b_long(out: &mut [u8], input: &[u8]) -> Result<(), Error> {
 
     if out.len() <= OUTBYTES {
         // Rejects `out.len() == 0`, as `blake2b_init(&S, 0)` does in the C.
-        let mut state = Blake2b::new(out.len())?;
+        // SAFETY: transferred from this function's caller.
+        let mut state = unsafe { Blake2b::new_with_backend(out.len(), backend)? };
         state.update(&outlen_bytes);
         state.update(input);
         return state.finalize(out);
@@ -412,7 +793,8 @@ pub fn blake2b_long(out: &mut [u8], input: &[u8]) -> Result<(), Error> {
     let mut out_buffer = [0u8; OUTBYTES];
     let mut in_buffer;
 
-    let mut state = Blake2b::new(OUTBYTES)?;
+    // SAFETY: transferred from this function's caller.
+    let mut state = unsafe { Blake2b::new_with_backend(OUTBYTES, backend)? };
     state.update(&outlen_bytes);
     state.update(input);
     state.finalize(&mut out_buffer)?;
@@ -424,7 +806,8 @@ pub fn blake2b_long(out: &mut [u8], input: &[u8]) -> Result<(), Error> {
 
     while tail.len() > OUTBYTES {
         in_buffer = out_buffer;
-        blake2b(&mut out_buffer, &in_buffer)?;
+        // SAFETY: transferred from this function's caller.
+        unsafe { blake2b_with_backend(&mut out_buffer, &in_buffer, backend)? };
         let (head, rest) = tail.split_at_mut(HALFBYTES);
         head.copy_from_slice(&out_buffer[..HALFBYTES]);
         tail = rest;
@@ -434,7 +817,8 @@ pub fn blake2b_long(out: &mut [u8], input: &[u8]) -> Result<(), Error> {
     // that was greater than 64, and the first split left at least 33.
     let toproduce = tail.len();
     in_buffer = out_buffer;
-    blake2b(&mut out_buffer[..toproduce], &in_buffer)?;
+    // SAFETY: transferred from this function's caller.
+    unsafe { blake2b_with_backend(&mut out_buffer[..toproduce], &in_buffer, backend)? };
     tail.copy_from_slice(&out_buffer[..toproduce]);
 
     clear_internal_memory(&mut out_buffer);
@@ -448,6 +832,114 @@ mod tests {
     use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
+
+    #[test]
+    fn detection_selects_the_preferred_executable_backend() {
+        let expected = {
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                if have_avx512vl() {
+                    Blake2bBackend::Avx512
+                } else if have_avx2() {
+                    Blake2bBackend::Avx2
+                } else if prefer_sse41() {
+                    Blake2bBackend::Sse41
+                } else {
+                    Blake2bBackend::Scalar
+                }
+            }
+            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+            {
+                Blake2bBackend::Scalar
+            }
+        };
+
+        assert_eq!(detect_blake2b_backend(), expected);
+        assert_eq!(blake2b_backend(), expected);
+        assert!(expected.is_available());
+    }
+
+    /// Every compiled SIMD compression backend must agree with the portable
+    /// function for arbitrary chaining values, counters, flags and blocks —
+    /// not only for the states that happen to occur in published vectors.
+    #[test]
+    fn compression_backends_match_scalar() {
+        fn next(x: &mut u64) -> u64 {
+            *x ^= *x << 13;
+            *x ^= *x >> 7;
+            *x ^= *x << 17;
+            *x
+        }
+
+        for &backend in Blake2bBackend::ALL {
+            if !backend.is_available() {
+                continue;
+            }
+
+            let implementation = compress_fn(backend);
+            let mut seed = 0x243f_6a88_85a3_08d3;
+            for case in 0..128 {
+                let mut expected = [0u64; 8];
+                for word in &mut expected {
+                    *word = next(&mut seed);
+                }
+                let mut actual = expected;
+                let t = [next(&mut seed), next(&mut seed)];
+                let f = [
+                    if case & 1 == 0 { 0 } else { u64::MAX },
+                    if case & 2 == 0 { 0 } else { u64::MAX },
+                ];
+                let mut m = [0u64; 16];
+                for word in &mut m {
+                    *word = next(&mut seed);
+                }
+
+                compress_scalar(&mut expected, &t, &f, &m);
+                // SAFETY: unavailable backends were skipped above.
+                unsafe { compress_parsed_with(implementation, &mut actual, &t, &f, &m) };
+                assert_eq!(expected, actual, "backend={}", backend.name());
+            }
+        }
+    }
+
+    /// Exercise the complete streaming and `blake2b_long` state machines with
+    /// every backend. This catches mistakes outside the raw compression state,
+    /// such as selecting a fresh backend for the extension chain.
+    #[test]
+    fn full_backends_match_scalar() {
+        let input: Vec<u8> = (0..=255).chain(0..=31).collect();
+        let input_lengths = [0, 1, 63, 64, 65, 127, 128, 129, 255, 256, 288];
+        let output_lengths = [1, 16, 32, 63, 64, 65, 96, 127, 128, 1024];
+
+        for &backend in Blake2bBackend::ALL {
+            if !backend.is_available() {
+                continue;
+            }
+            for &input_len in &input_lengths {
+                for &output_len in &output_lengths {
+                    let mut expected = vec![0u8; output_len];
+                    let mut actual = vec![0u8; output_len];
+                    // SAFETY: scalar is always executable; every other backend
+                    // passed the availability guard above.
+                    unsafe {
+                        blake2b_long_with_backend(
+                            &mut expected,
+                            &input[..input_len],
+                            Blake2bBackend::Scalar,
+                        )
+                        .expect("valid lengths");
+                        blake2b_long_with_backend(
+                            &mut actual,
+                            &input[..input_len],
+                            backend,
+                        )
+                        .expect("valid lengths");
+                    }
+                    assert_eq!(expected, actual, "backend={} input={input_len} out={output_len}", backend.name());
+                }
+            }
+        }
+    }
 
     // ------------------------------------------------------------------
     // Ground truth.

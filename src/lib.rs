@@ -250,25 +250,28 @@ pub fn detected_backend() -> Backend {
 /// # Soundness
 ///
 /// Unstable is not the same as unsound. Every entry point here that takes an
-/// explicit [`Backend`] — `fill_memory_blocks_traced`, `hash_traced`,
-/// `hash_with_backend` — is an `unsafe fn`, and so is each backend's
-/// `fill_segment`. They dispatch to a `#[target_feature(enable = ...)]`
-/// function, so running one whose feature this CPU lacks is undefined behaviour
-/// (`SIGILL` in practice), and only the caller can rule that out:
-/// [`Backend::is_available`] is the portable way.
+/// explicit [`Backend`] or `Blake2bBackend` — including
+/// `fill_memory_blocks_traced`, `hash_traced`, `hash_with_backend`,
+/// `blake2b_with_backend`, and `blake2b_long_with_backend` — is an `unsafe fn`,
+/// and so is each backend's low-level entry point. They dispatch to a
+/// `#[target_feature(enable = ...)]` function, so running one whose feature
+/// this CPU lacks is undefined behaviour (`SIGILL` in practice), and only the
+/// caller can rule that out. Each backend type's `is_available` method is the
+/// portable way.
 ///
-/// The safe entry points — [`Argon2`], [`detected_backend`],
-/// `fill_memory_blocks` — never let a caller name the backend. They take it from
-/// `fill_block::backend()`, the cached runtime cascade, which by construction
-/// only ever names a backend this CPU advertises. That is the whole reason they
-/// can be safe, and it is why turning on `internal-api` cannot make a
-/// `#![forbid(unsafe_code)]` program reachable by UB.
+/// The safe entry points — [`Argon2`], [`detected_backend`], `blake2b`,
+/// `blake2b_long`, and `fill_memory_blocks` — never let a caller name the
+/// backend. They take it from the corresponding cached runtime cascade, which
+/// by construction only ever names a backend this CPU advertises. That is the
+/// whole reason they can be safe, and it is why turning on `internal-api`
+/// cannot make a `#![forbid(unsafe_code)]` program reachable by UB.
 #[cfg(feature = "internal-api")]
 #[doc(hidden)]
 pub mod __internal {
     pub use crate::blake2b::{
-        BLOCKBYTES, Blake2b, IV, KEYBYTES, OUTBYTES, PERSONALBYTES, SALTBYTES, blake2b,
-        blake2b_long,
+        BLOCKBYTES, Blake2b, Blake2bBackend, IV, KEYBYTES, OUTBYTES, PERSONALBYTES, SALTBYTES,
+        blake2b, blake2b_backend, blake2b_long, blake2b_long_with_backend, blake2b_with_backend,
+        detect_blake2b_backend,
     };
     pub use crate::block::{Block, Instance, Position};
     pub use crate::core::{
