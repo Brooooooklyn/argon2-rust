@@ -927,12 +927,12 @@ fn reset_bump_reclaims_and_the_absence_of_a_reset_does_not() {
 // 5. Failure modes worth knowing about
 // ---------------------------------------------------------------------------
 
-/// FINDING. `Workspace::reserve` drops the parked arena *before* it validates
-/// the new size, so a request that could never have been allocated — one whose
-/// `Layout` does not even exist — still costs the caller the arena it already
-/// had. The validation needs no memory and could run first.
+/// A request whose `Layout` cannot exist is rejected before the parked arena is
+/// released. This preserves the old allocation without weakening the separate
+/// peak-RSS rule: a size that passes validation is still allocated only after
+/// the old arena has been freed.
 #[test]
-fn a_reserve_that_cannot_even_be_laid_out_still_destroys_the_parked_arena() {
+fn an_impossible_reserve_keeps_the_parked_arena() {
     let mut ws = Workspace::with_capacity(64).expect("workspace");
     let before = ws.acquire(64).expect("peek").as_ptr();
     assert_eq!(ws.capacity(), 64);
@@ -946,19 +946,23 @@ fn a_reserve_that_cannot_even_be_laid_out_still_destroys_the_parked_arena() {
 
     assert_eq!(
         ws.capacity(),
-        0,
+        64,
         "an impossible request must not cost the caller the arena it already had"
     );
     let after = ws.acquire(64).expect("reacquire").as_ptr();
-    let _ = (before, after); // reallocated; addresses may or may not coincide
+    assert_eq!(
+        after, before,
+        "the original allocation must still be parked"
+    );
 }
 
-/// The same shape one level up: `acquire` is the one that matters for a running
-/// server, and it does *not* have the problem — a failed acquire leaves the
-/// workspace usable, because the failure happens after the arena was taken.
+/// The same invariant one level up: a deterministic `acquire` failure retains
+/// the arena, so a running server does not pay for a new allocation on its next
+/// valid request.
 #[test]
-fn a_failed_acquire_leaves_the_workspace_usable() {
+fn an_impossible_acquire_keeps_the_parked_arena() {
     let mut ws = Workspace::with_capacity(64).expect("workspace");
+    let before = ws.acquire(64).expect("peek").as_ptr();
     assert_eq!(
         ws.acquire(0).err(),
         Some(Error::MemoryAllocationError),
@@ -972,10 +976,16 @@ fn a_failed_acquire_leaves_the_workspace_usable() {
     );
     assert_eq!(
         ws.capacity(),
-        0,
-        "an over-large acquire drops the parked arena before it fails"
+        64,
+        "an over-large acquire must retain the parked arena"
     );
-    assert_eq!(ws.acquire(64).expect("still usable").len(), 64);
+    let after = ws.acquire(64).expect("still usable");
+    assert_eq!(after.len(), 64);
+    assert_eq!(
+        after.as_ptr(),
+        before,
+        "the original allocation must survive"
+    );
 }
 
 /// `Hasher::verify_encoded` takes its parameters from the *string*, and the

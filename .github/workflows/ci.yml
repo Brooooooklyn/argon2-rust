@@ -89,6 +89,19 @@ jobs:
           targets: thumbv7em-none-eabi
       - run: cargo build --release --no-default-features --target thumbv7em-none-eabi
 
+  docs:
+    name: rustdoc (all features, warnings denied)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Public-to-private intra-doc links render in local private-item builds but
+      # fail on docs.rs. Denying warnings keeps the published surface honest.
+      - run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   msrv:
     # `rust-version` is a promise to downstream: Cargo hard-refuses the crate on
     # anything older, so a number sitting above the true floor locks users out

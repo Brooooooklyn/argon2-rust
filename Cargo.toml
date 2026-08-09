@@ -36,9 +36,10 @@ parallel = ["std"]
 # Securely wipe internal buffers (mirrors `FLAG_clear_internal_memory` in core.c).
 zeroize-memory = []
 
-# Opt-in bump allocator (`bumpalo`) for the *small, short-lived* scratch
-# buffers, reachable through `memory::Workspace`. OFF BY DEFAULT ON PURPOSE —
-# see the dependency note below for the measurement that decided it.
+# Internal benchmark/control for a reusable `bumpalo::Bump` inside `Workspace`.
+# `Workspace` is reachable only through the unstable `internal-api`; enabling
+# this feature alone does not change any stable hashing or encoding path. OFF BY
+# DEFAULT ON PURPOSE — see the dependency note below for the measurement.
 bump-alloc = ["dep:bumpalo"]
 
 # Exposes `argon2_rust::__internal` so tests/benches can drive individual
@@ -68,12 +69,13 @@ internal-api = []
 #     run-to-run noise.
 #   * Only a long-lived, reset-between-uses bump is ahead. `Bump::new()` plus
 #     one 98 B buffer costs 18.5 ns against that `Vec`'s 9.0 ns, so a fresh
-#     bump per call is a regression. That is why the only bump this crate
-#     exposes lives inside a reusable `Workspace`.
+#     bump per call is a regression. The benchmark control therefore keeps its
+#     bump inside a reusable `Workspace`.
 #
 # 17 ns does not justify making a zero-dependency cryptographic crate depend on
-# anything. It does justify letting a caller who has measured their own
-# workload opt in. Hence: optional, default off.
+# anything on its stable paths. It does justify retaining the measured
+# counterfactual for internal tests and benches. Hence: optional, default off,
+# and not wired into `Hasher` or the encoding API.
 #
 # `default-features = false` is belt and braces: bumpalo's default feature set
 # is already empty (verified in bumpalo-3.20.3/Cargo.toml) and it is

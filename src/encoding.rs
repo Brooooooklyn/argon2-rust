@@ -181,7 +181,7 @@ const fn b64_char_to_byte(c: u32) -> u32 {
 /// C. It cannot panic (`<<` discards bits rather than trapping, and the sums in
 /// [`encoded_len`] stay inside `usize` even after a wrap), and it is not on the
 /// allocation path — [`encode_string_alloc`] sizes its buffer with
-/// [`encoded_len_usize`], which takes real slice lengths and cannot wrap.
+/// `encoded_len_usize`, which takes real slice lengths and cannot wrap.
 #[must_use]
 pub const fn b64_len(len: u32) -> usize {
     b64_len_usize(len as usize)

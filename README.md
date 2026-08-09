@@ -10,9 +10,10 @@ implementation (RFC 9106), with **runtime-dispatched SIMD** — faster than the
 C reference, OpenSSL, and the popular Rust crates, on both x86-64 and aarch64.
 
 - **Zero mandatory dependencies**, `#![no_std]` + `alloc`
-- **Bit-exact with the C reference** — verified against the official KAT
-  traces (12,304 lines of internal state per file), the official `test.c`
-  vectors, and a live differential harness comparing tags *and* C error codes
+- **Bit-exact with the C reference for Argon2 versions 16 and 19** — verified
+  against the official KAT traces (12,304 lines of internal state per file),
+  the official `test.c` vectors, and a live differential harness comparing tags
+  and C error codes over the supported parameter and canonical-PHC matrix
 - **Runtime CPU dispatch**: AVX-512 → AVX2 → SSE2(+SSSE3) → NEON → scalar,
   cached in a single atomic; safe code can never reach an instruction set the
   CPU lacks. On wasm32 a **SIMD128** backend is selected at compile time
@@ -23,8 +24,8 @@ C reference, OpenSSL, and the popular Rust crates, on both x86-64 and aarch64.
   wipe with a compiler barrier that survives `-O3`, optional pooled arena
   reuse across hashes
 - **Full API**: raw hash, PHC encode/decode, verify, d/i/id × v0x10/v0x13,
-  password-flavored aliases, error codes identical to the C (`-1..-35`, plus
-  one crate-specific `-100` for OS-entropy failure)
+  password-flavored aliases, the C error-code range (`-1..-35`), plus one
+  crate-specific `-100` for OS-entropy failure
 - **Salt generation without a dependency**: `hash_password_with_random_salt`
   reads the OS CSPRNG through the right entry point per platform
   (`getrandom(2)`, `getentropy`, `CCRandomGenerateBytes`, `ProcessPrng`, WASI
@@ -201,11 +202,33 @@ the CPU lacks. Explicit-backend entry points exist for testing and are
 | `std` | ✓ | runtime CPU detection (falls back to compile-time cfgs without it) |
 | `parallel` | ✓ | multi-lane fill on the persistent worker pool |
 | `zeroize-memory` | ✓ | wipe internal buffers (the C's `FLAG_clear_internal_memory`) |
-| `bump-alloc` | | opt-in bump allocator for small scratch buffers inside a reusable `Workspace` |
+| `bump-alloc` | | internal test/bench control for `Workspace`; does not change stable hashing paths |
 | `internal-api` | | test/bench hooks (`__internal`); never enable in production |
 
 `--no-default-features` builds for `no_std` (with `alloc`), including e.g.
 `thumbv7em-none-eabi`.
+
+## C parser compatibility limits
+
+The hash core is bit-exact for the two standard versions this crate represents,
+and PHC strings emitted by this crate round-trip with the C reference. Its Rust
+decoder is intentionally stricter than C on four inputs outside that ordinary
+surface:
+
+- C accepts any numeric `$v=` value because its validator does not inspect the
+  version. This crate's closed `Version` enum accepts only 16 and 19 and returns
+  `DecodingFail` otherwise.
+- C verification uses `strlen` and therefore ignores bytes after an embedded
+  NUL. A Rust `&str` has an explicit length, so this crate requires the whole
+  string to be consumed.
+- On targets where C `char` is signed, the reference decoder can misclassify
+  non-ASCII bytes as Base64 `/`. This crate rejects them on every target.
+- The standalone decoder validates with a zero-length password; the verify
+  entry points perform the password-length check separately. This differs only
+  for inputs larger than the C API's 4 GiB password limit.
+
+These are parser-acceptance differences, not differences in Argon2 tags for
+supported versions and canonical ASCII PHC strings.
 
 ## Verification
 

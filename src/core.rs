@@ -23,9 +23,17 @@ use crate::params::{
 /// The KAT trace hook: `internal_kat(instance, pass)` from `src/genkat.c`.
 ///
 /// Invoked after every pass with `(pass_index, whole_arena)`, at a point where
-/// every worker thread has been joined. `tests/kat.rs` uses it to dump the
-/// arena the way `genkat` does.
+/// every helper is parked at the pass boundary and cannot touch the arena.
+/// `tests/kat.rs` uses it to dump the arena the way `genkat` does.
 pub type PassTrace<'a> = &'a mut dyn FnMut(u32, &[Block]);
+
+// Structural regression hook for the zeroization boundary: stable hashing must
+// never ask `hash_in_arena` to copy H0 out of the blockhash it already wipes.
+// Thread-local keeps parallel libtest cases from charging one another.
+#[cfg(all(test, feature = "std"))]
+std::thread_local! {
+    static H0_COPY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 // ---------------------------------------------------------------------------
 // index_alpha  (contract: called by every fill_block backend)
@@ -221,6 +229,35 @@ pub fn initial_hash(
     secret: &[u8],
     ad: &[u8],
 ) -> Result<[u8; PREHASH_SEED_LENGTH], Error> {
+    let mut blockhash = [0u8; PREHASH_SEED_LENGTH];
+    initial_hash_into(
+        algorithm,
+        version,
+        params,
+        pwd,
+        salt,
+        secret,
+        ad,
+        &mut blockhash,
+    )?;
+    Ok(blockhash)
+}
+
+/// [`initial_hash`] written directly into its caller's wipe-owned buffer.
+///
+/// The stable hash path uses this form so returning a 72-byte `Result` cannot
+/// make the optimiser leave an intermediate H0 copy behind on the stack.
+#[allow(clippy::too_many_arguments)]
+fn initial_hash_into(
+    algorithm: Algorithm,
+    version: Version,
+    params: &Params,
+    pwd: &[u8],
+    salt: &[u8],
+    secret: &[u8],
+    ad: &[u8],
+    blockhash: &mut [u8; PREHASH_SEED_LENGTH],
+) -> Result<(), Error> {
     /// `store32(&value, len); blake2b_update(&BlakeHash, &value, 4);`
     #[inline]
     fn le32(len: usize) -> [u8; 4] {
@@ -256,10 +293,8 @@ pub fn initial_hash(
     state.update(ad);
 
     // core.c:609 `blake2b_final(&BlakeHash, blockhash, ARGON2_PREHASH_DIGEST_LENGTH);`
-    let mut blockhash = [0u8; PREHASH_SEED_LENGTH];
     state.finalize(&mut blockhash[..PREHASH_DIGEST_LENGTH])?;
-
-    Ok(blockhash)
+    Ok(())
 }
 
 /// `fill_first_blocks()` from `src/core.c`.
@@ -362,13 +397,14 @@ pub fn fill_memory_blocks(instance: &Instance) -> Result<(), Error> {
 /// indirect call per *segment*, which is `segment_length` blocks.
 ///
 /// `trace` is `internal_kat()` from `src/genkat.c`: it is invoked after every
-/// pass with `(pass_index, whole_arena)`, at a point where every worker has been
-/// joined.
+/// pass with `(pass_index, whole_arena)`, at a point where every helper is
+/// parked at the barrier and cannot touch the arena.
 ///
-/// With the `parallel` feature and `instance.threads > 1`, the lane loop runs in
-/// a [`std::thread::scope`] — one scope per *slice*, so the slice boundary is a
-/// real barrier matching the C's sync points. The single-threaded path holds no
-/// raw-pointer sharing at all, so it stays checkable under Miri.
+/// With the `parallel` feature and `instance.threads > 1`, one
+/// [`std::thread::scope`] owns the helpers for the whole fill. They meet at an
+/// atomic barrier after each slice, matching the C's sync points without
+/// respawning. The single-threaded path holds no raw-pointer sharing at all, so
+/// it stays checkable under Miri.
 ///
 /// # Safety
 ///
@@ -503,9 +539,10 @@ struct SharedInstance<'a>(&'a Instance);
 // through it the arena's `*mut Block`. That is sound for the one way
 // `fill_slice_mt` uses it, and only that way:
 //
-//  * All workers inside one `std::thread::scope` run the SAME `(pass, slice)`
-//    and pairwise DISTINCT `lane`s: lanes are claimed from a single
-//    `fetch_add` counter, so every index is handed out exactly once.
+//  * At each sync point, every worker in the whole-fill `std::thread::scope`
+//    runs the SAME `(pass, slice)` and pairwise DISTINCT `lane`s: lanes are
+//    claimed from a single `fetch_add` counter, so every index is handed out
+//    exactly once.
 //  * Within one slice, `fill_segment(instance, {pass, lane, slice, ..})`
 //    WRITES only blocks `lane * lane_length + slice * segment_length + i` for
 //    `i in 0..segment_length` — precisely the one segment that lane owns in
@@ -519,9 +556,11 @@ struct SharedInstance<'a>(&'a Instance);
 //    the *other three* slices (pass > 0, `start_position` skips the current
 //    one). Either way it never lands in another lane's current segment, which
 //    is the only region being written concurrently. So no read races a write.
-//  * The scope is per SLICE, so it is a real barrier: every write of slice `s`
-//    happens-before every read in slice `s + 1`, which is what makes "finished
-//    in an earlier slice" true above. This mirrors the C's sync points.
+//  * The scope spans the whole fill. At each slice boundary, every helper
+//    publishes its writes with `Release` on `arrived`; the leader acquires them,
+//    resets the work counters, then releases the next `generation`, which every
+//    helper acquires before proceeding. Thus every write of slice `s`
+//    happens-before every read in slice `s + 1`, mirroring the C's sync points.
 //  * The `Instance` struct itself is only ever read; the interior mutability is
 //    confined to the arena it points at, via `Instance::block_mut`.
 //
@@ -1784,9 +1823,9 @@ fn decode_bounded(
 ///
 /// [`hash_encoded`](Hasher::hash_encoded) and
 /// [`verify_encoded`](Hasher::verify_encoded) allocate short-lived scratch
-/// (98 B to encode, 51 B + 33 B to decode), and the `bump-alloc` feature puts a
-/// reusable bump allocator inside the very workspace this type owns. It is
-/// deliberately **not** wired up here, for two reasons.
+/// (98 B to encode, 51 B + 33 B to decode). The `bump-alloc` feature provides a
+/// reusable bump inside `Workspace` only as an `internal-api` test/bench control;
+/// it is deliberately **not** a stable `Hasher` optimisation, for two reasons.
 ///
 /// First, the size: a bump saves 17 ns across all three buffers, which is 0.16%
 /// of the smallest Argon2 hash that exists and 0.00013% of an RFC 9106 one —
@@ -1797,8 +1836,9 @@ fn decode_bounded(
 /// move to a bump at any price: `encode_string_alloc` hands that exact
 /// allocation to `String::from_utf8`, so it *is* the `String` this method
 /// returns. Only the two decode buffers could, and that would mean changing
-/// `decode_string`'s signature to buy 12 ns. The feature stays available for a
-/// caller who has measured their own workload and disagrees.
+/// `decode_string`'s signature to buy 12 ns. The feature stays available to the
+/// internal benchmark so that this tradeoff remains measured rather than
+/// assumed; enabling it does not change this stable API.
 ///
 /// # Wiping
 ///
@@ -2412,9 +2452,9 @@ impl Hasher {
                 ad,
                 out,
                 None,
+                None,
             )
         }
-        .map(|_h0| ())
     }
 
     /// [`Argon2::verify`]'s body, over this hasher's memory.
@@ -2497,11 +2537,55 @@ unsafe fn hash_inner(
 ) -> Result<(), Error> {
     // SAFETY: forwarded verbatim from this function's own contract.
     unsafe {
-        hash_traced(
-            backend, algorithm, version, params, pwd, salt, secret, ad, out, None,
+        hash_owned(
+            backend, algorithm, version, params, pwd, salt, secret, ad, out, None, None,
         )
     }
-    .map(|_h0| ())
+}
+
+/// One-shot hashing over a freshly allocated arena.
+///
+/// `h0_out` is `None` on every stable API path. That distinction is
+/// security-relevant: normal hashing must not materialise a second copy of H0
+/// merely to throw it away after the computation. The unstable KAT hook passes
+/// a destination because H0 is one of its requested outputs.
+///
+/// # Safety
+///
+/// As [`fill_memory_blocks_traced`]: this CPU must be able to execute `backend`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn hash_owned(
+    backend: Backend,
+    algorithm: Algorithm,
+    version: Version,
+    params: &Params,
+    pwd: &[u8],
+    salt: &[u8],
+    secret: &[u8],
+    ad: &[u8],
+    out: &mut [u8],
+    trace: Option<PassTrace<'_>>,
+    h0_out: Option<&mut [u8; PREHASH_DIGEST_LENGTH]>,
+) -> Result<(), Error> {
+    let memory_blocks = validate_and_size(params, pwd, salt, secret, ad, out)?;
+
+    // core.c:621 "1. Memory allocation". A fresh allocation every call, freed
+    // on the way out. `Hasher` runs the same computation over an arena borrowed
+    // from a `Workspace`.
+    let mut arena = Arena::new(memory_blocks)?;
+
+    // SAFETY: `backend` is forwarded verbatim from this function's own
+    // contract. `arena` was just sized from the same `params`, and it lives
+    // until the end of this function, i.e. past every use inside.
+    unsafe {
+        hash_in_arena(
+            &mut arena, backend, algorithm, version, params, pwd, salt, secret, ad, out, trace,
+            h0_out,
+        )
+    }
+    // `arena` drops here: `Arena::drop` wipes it (`zeroize-memory`) and frees
+    // it, which is core.c:184's `free_memory(...)`. It drops on `Ok`, `Err` and
+    // unwind alike. The two `?`s above fire before the arena exists.
 }
 
 /// `argon2_ctx()` with the two hooks `src/genkat.c` needs.
@@ -2534,26 +2618,30 @@ pub unsafe fn hash_traced(
     out: &mut [u8],
     trace: Option<PassTrace<'_>>,
 ) -> Result<[u8; PREHASH_DIGEST_LENGTH], Error> {
-    // argon2.c:41-70 steps 1 and 2.
-    let memory_blocks = validate_and_size(params, pwd, salt, secret, ad, out)?;
-
-    // core.c:621 "1. Memory allocation". A fresh allocation every call, freed on
-    // the way out — this is the one-shot path and it is unchanged. `Hasher` is
-    // the same computation over an arena borrowed from a `Workspace`.
-    let mut arena = Arena::new(memory_blocks)?;
-
-    // SAFETY: `backend` is forwarded verbatim from this function's own
-    // contract. `arena` was just sized from the same `params`, and it lives
-    // until the end of this function, i.e. past every use inside.
-    unsafe {
-        hash_in_arena(
-            &mut arena, backend, algorithm, version, params, pwd, salt, secret, ad, out, trace,
+    let mut h0 = [0u8; PREHASH_DIGEST_LENGTH];
+    // SAFETY: forwarded verbatim from this function's own contract.
+    let result = unsafe {
+        hash_owned(
+            backend,
+            algorithm,
+            version,
+            params,
+            pwd,
+            salt,
+            secret,
+            ad,
+            out,
+            trace,
+            Some(&mut h0),
         )
+    };
+    if let Err(error) = result {
+        // H0 was requested as output, but an error means it will not leave this
+        // function. Do not turn that failed internal trace into stack residue.
+        clear_internal_memory(&mut h0);
+        return Err(error);
     }
-    // `arena` drops here: `Arena::drop` wipes it (`zeroize-memory`) and frees
-    // it, which is core.c:184's `free_memory(...)`. It drops whether that call
-    // returned `Ok` or `Err`, and on unwind. The two `?`s above fire before the
-    // arena exists, so there is nothing to wipe on those paths.
+    Ok(h0)
 }
 
 /// Steps 1 and 2 of `argon2_ctx()`: validate every input, then align the memory
@@ -2626,7 +2714,8 @@ unsafe fn hash_in_arena(
     ad: &[u8],
     out: &mut [u8],
     trace: Option<PassTrace<'_>>,
-) -> Result<[u8; PREHASH_DIGEST_LENGTH], Error> {
+    h0_out: Option<&mut [u8; PREHASH_DIGEST_LENGTH]>,
+) -> Result<(), Error> {
     let (memory_blocks, _segment_length, lane_length) = params.memory_layout();
 
     // `Instance::new`'s safety contract is `memory_len == memory_blocks`, and
@@ -2647,9 +2736,25 @@ unsafe fn hash_in_arena(
 
     // core.c:631 "2. Initial hashing". The 8 bytes after `H0` are already zero,
     // which is what core.c:633 achieves with `clear_internal_memory`.
-    let mut blockhash = initial_hash(algorithm, version, params, pwd, salt, secret, ad)?;
-    let mut h0 = [0u8; PREHASH_DIGEST_LENGTH];
-    h0.copy_from_slice(&blockhash[..PREHASH_DIGEST_LENGTH]);
+    let mut blockhash = [0u8; PREHASH_SEED_LENGTH];
+    if let Err(error) = initial_hash_into(
+        algorithm,
+        version,
+        params,
+        pwd,
+        salt,
+        secret,
+        ad,
+        &mut blockhash,
+    ) {
+        clear_internal_memory(&mut blockhash);
+        return Err(error);
+    }
+    if let Some(h0) = h0_out {
+        #[cfg(all(test, feature = "std"))]
+        H0_COPY_COUNT.with(|count| count.set(count.get() + 1));
+        h0.copy_from_slice(&blockhash[..PREHASH_DIGEST_LENGTH]);
+    }
 
     // core.c:643 "3. Creating first blocks".
     let fill_first = fill_first_blocks(
@@ -2684,7 +2789,7 @@ unsafe fn hash_in_arena(
     // both callers do it in a `Drop`.
     finalize(&instance, out)?;
 
-    Ok(h0)
+    Ok(())
 }
 
 /// [`hash_traced`] over an arena borrowed from `workspace` instead of a fresh
@@ -2710,7 +2815,8 @@ unsafe fn hash_in_workspace(
     ad: &[u8],
     out: &mut [u8],
     trace: Option<PassTrace<'_>>,
-) -> Result<[u8; PREHASH_DIGEST_LENGTH], Error> {
+    h0_out: Option<&mut [u8; PREHASH_DIGEST_LENGTH]>,
+) -> Result<(), Error> {
     let memory_blocks = validate_and_size(params, pwd, salt, secret, ad, out)?;
 
     // The whole point: no allocator call and no zeroing memset when the parked
@@ -2723,6 +2829,7 @@ unsafe fn hash_in_workspace(
     unsafe {
         hash_in_arena(
             &mut arena, backend, algorithm, version, params, pwd, salt, secret, ad, out, trace,
+            h0_out,
         )
     }
     // The `ArenaGuard` drops here and hands the arena back to `workspace` after
@@ -3095,6 +3202,47 @@ mod tests {
         }));
         // 0x80 in the high bit: the C's `d - 1` must not sign-extend wrongly.
         assert!(!constant_time_eq(&[0u8; 4], &[0, 0, 0, 0x80]));
+    }
+
+    /// The stable one-shot and pooled paths must leave H0 only inside the
+    /// 72-byte `blockhash` that `hash_in_arena` wipes. Copying it is reserved
+    /// for the unstable KAT API whose return value explicitly is H0.
+    #[cfg(feature = "std")]
+    #[test]
+    fn stable_hashes_do_not_copy_h0_out_of_the_wiped_blockhash() {
+        H0_COPY_COUNT.with(|count| count.set(0));
+
+        let params = Params::new(32, 1, 1, 32).expect("params");
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let mut tag = [0u8; 32];
+        argon2
+            .hash_into(b"password", b"somesalt", &mut tag)
+            .expect("one-shot hash");
+        let mut hasher = argon2.hasher();
+        hasher
+            .hash_into(b"password", b"somesalt", &mut tag)
+            .expect("pooled hash");
+        H0_COPY_COUNT.with(|count| assert_eq!(count.get(), 0, "stable paths copied H0"));
+
+        // The hook itself must be live or the zero above would prove nothing.
+        // SAFETY: the scalar backend is available on every CPU.
+        let mut h0 = unsafe {
+            hash_traced(
+                Backend::Scalar,
+                argon2.algorithm,
+                argon2.version,
+                &argon2.params,
+                b"password",
+                b"somesalt",
+                &[],
+                &[],
+                &mut tag,
+                None,
+            )
+        }
+        .expect("traced hash");
+        H0_COPY_COUNT.with(|count| assert_eq!(count.get(), 1, "trace did not copy H0"));
+        clear_internal_memory(&mut h0);
     }
 
     // ------------------------------------------------------------------
@@ -3584,10 +3732,11 @@ mod tests {
         salt: &[u8],
     ) -> Dump {
         let mut tag = [0u8; 32];
+        let mut h0 = [0u8; PREHASH_DIGEST_LENGTH];
         let mut passes: alloc::vec::Vec<(u32, alloc::vec::Vec<Block>)> = alloc::vec::Vec::new();
         let mut trace = |pass: u32, blocks: &[Block]| passes.push((pass, blocks.to_vec()));
         // SAFETY: forwarded verbatim from this function's own contract.
-        let h0 = unsafe {
+        unsafe {
             hash_in_workspace(
                 workspace,
                 backend,
@@ -3600,6 +3749,7 @@ mod tests {
                 &[4u8; 12],
                 &mut tag,
                 Some(&mut trace),
+                Some(&mut h0),
             )
         }
         .expect("pooled hash");
@@ -3830,6 +3980,7 @@ mod tests {
                 &[],
                 &[],
                 &mut out,
+                None,
                 None,
             )
         }
@@ -4144,6 +4295,7 @@ mod tests {
                 &[],
                 &[],
                 &mut out,
+                None,
                 None,
             )
         };
