@@ -788,7 +788,8 @@ pub fn decode_string(encoded: &str, algorithm: Algorithm) -> Result<Decoded, Err
     // `max_field_len` from it. Here it lives in the decoder because all four
     // verify entry points funnel through this function, so one check covers
     // them and cannot drift; through the public API the behaviour is identical.
-    // Reachable only from a `&str` over 4 GiB.
+    // Reachable only where `usize` is wider than `u32`, from a `&str` at least
+    // 4 GiB long.
     if src.len() > u32::MAX as usize {
         return Err(Error::DecodingFail);
     }
