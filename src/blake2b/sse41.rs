@@ -118,7 +118,12 @@ unsafe fn swap(a: __m128i) -> __m128i {
 /// selected shuffle sequence.
 #[inline(always)]
 unsafe fn message(m: &[__m128i; 8], round: usize, quarter: usize) -> (__m128i, __m128i) {
-    let round = if round >= 10 { round - 10 } else { round };
+    debug_assert!(round < 12 && quarter < 4);
+    let round = match round {
+        0..=9 => round,
+        10 | 11 => round - 10,
+        _ => unreachable!("BLAKE2b has exactly twelve rounds"),
+    };
     // SAFETY: the caller established SSE4.1. Every helper below has that same
     // requirement, and the round driver passes quarters 0..=3 only.
     unsafe {
@@ -172,7 +177,7 @@ unsafe fn message(m: &[__m128i; 8], round: usize, quarter: usize) -> (__m128i, _
             (9, 1) => (lo(m[1], m[2]), blend_hi(m[3], m[2])),
             (9, 2) => (hi(m[7], m[4]), hi(m[1], m[6])),
             (9, 3) => (align8(m[7], m[5]), lo(m[6], m[0])),
-            _ => core::hint::unreachable_unchecked(),
+            _ => unreachable!("a BLAKE2b round has exactly four quarters"),
         }
     }
 }

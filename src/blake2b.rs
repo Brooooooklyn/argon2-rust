@@ -919,7 +919,8 @@ mod tests {
                 for &output_len in &output_lengths {
                     let mut expected = vec![0u8; output_len];
                     let mut actual = vec![0u8; output_len];
-                    // SAFETY: scalar is always executable.
+                    // SAFETY: scalar is always executable; every other backend
+                    // passed the availability guard above.
                     unsafe {
                         blake2b_long_with_backend(
                             &mut expected,

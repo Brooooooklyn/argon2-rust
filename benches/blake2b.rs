@@ -66,6 +66,7 @@ fn main() {
     short.finish();
 
     let mut expand = criterion.benchmark_group("blake2b/expand_72_to_1024");
+    expand.throughput(Throughput::Bytes(SHORT_INPUT.len() as u64));
     for &backend in Blake2bBackend::ALL {
         if !backend.is_available() {
             continue;
