@@ -318,44 +318,50 @@ pub fn fill_first_blocks(
 ) -> Result<(), Error> {
     let mut blockhash_bytes = [0u8; BLOCK_SIZE];
 
-    for lane in 0..lanes {
-        // core.c:522-523
-        //   store32(blockhash + ARGON2_PREHASH_DIGEST_LENGTH, 0);
-        //   store32(blockhash + ARGON2_PREHASH_DIGEST_LENGTH + 4, l);
-        blockhash[PREHASH_DIGEST_LENGTH..PREHASH_DIGEST_LENGTH + 4]
-            .copy_from_slice(&0u32.to_le_bytes());
-        blockhash[PREHASH_DIGEST_LENGTH + 4..PREHASH_SEED_LENGTH]
-            .copy_from_slice(&lane.to_le_bytes());
+    // Unlike the C helper, this safe internal-api entry point reports a short
+    // arena instead of indexing unchecked. Keep every fallible exit inside the
+    // closure so the derived block bytes are wiped before the error escapes.
+    let result = (|| {
+        for lane in 0..lanes {
+            // core.c:522-523
+            //   store32(blockhash + ARGON2_PREHASH_DIGEST_LENGTH, 0);
+            //   store32(blockhash + ARGON2_PREHASH_DIGEST_LENGTH + 4, l);
+            blockhash[PREHASH_DIGEST_LENGTH..PREHASH_DIGEST_LENGTH + 4]
+                .copy_from_slice(&0u32.to_le_bytes());
+            blockhash[PREHASH_DIGEST_LENGTH + 4..PREHASH_SEED_LENGTH]
+                .copy_from_slice(&lane.to_le_bytes());
 
-        // core.c:524-525 `blake2b_long(blockhash_bytes, ARGON2_BLOCK_SIZE,
-        //                              blockhash, ARGON2_PREHASH_SEED_LENGTH);`
-        blake2b_long(&mut blockhash_bytes, blockhash)?;
+            // core.c:524-525 `blake2b_long(blockhash_bytes, ARGON2_BLOCK_SIZE,
+            //                              blockhash, ARGON2_PREHASH_SEED_LENGTH);`
+            blake2b_long(&mut blockhash_bytes, blockhash)?;
 
-        // core.c:526-527 `load_block(&instance->memory[l * lane_length + 0], ..)`
-        let base = (lane as usize)
-            .checked_mul(lane_length as usize)
-            .ok_or(Error::IncorrectParameter)?;
-        match arena.get_mut(base) {
-            Some(block) => block.load_le(&blockhash_bytes),
-            None => return Err(Error::IncorrectParameter),
+            // core.c:526-527 `load_block(&instance->memory[l * lane_length + 0], ..)`
+            let base = (lane as usize)
+                .checked_mul(lane_length as usize)
+                .ok_or(Error::IncorrectParameter)?;
+            match arena.get_mut(base) {
+                Some(block) => block.load_le(&blockhash_bytes),
+                None => return Err(Error::IncorrectParameter),
+            }
+
+            // core.c:529 `store32(blockhash + ARGON2_PREHASH_DIGEST_LENGTH, 1);`
+            blockhash[PREHASH_DIGEST_LENGTH..PREHASH_DIGEST_LENGTH + 4]
+                .copy_from_slice(&1u32.to_le_bytes());
+            blake2b_long(&mut blockhash_bytes, blockhash)?;
+
+            // core.c:532-533 `load_block(&instance->memory[l * lane_length + 1], ..)`
+            let second = base.checked_add(1).ok_or(Error::IncorrectParameter)?;
+            match arena.get_mut(second) {
+                Some(block) => block.load_le(&blockhash_bytes),
+                None => return Err(Error::IncorrectParameter),
+            }
         }
-
-        // core.c:529 `store32(blockhash + ARGON2_PREHASH_DIGEST_LENGTH, 1);`
-        blockhash[PREHASH_DIGEST_LENGTH..PREHASH_DIGEST_LENGTH + 4]
-            .copy_from_slice(&1u32.to_le_bytes());
-        blake2b_long(&mut blockhash_bytes, blockhash)?;
-
-        // core.c:532-533 `load_block(&instance->memory[l * lane_length + 1], ..)`
-        let second = base.checked_add(1).ok_or(Error::IncorrectParameter)?;
-        match arena.get_mut(second) {
-            Some(block) => block.load_le(&blockhash_bytes),
-            None => return Err(Error::IncorrectParameter),
-        }
-    }
+        Ok(())
+    })();
 
     // core.c:535 `clear_internal_memory(blockhash_bytes, ARGON2_BLOCK_SIZE);`
     clear_internal_memory(&mut blockhash_bytes);
-    Ok(())
+    result
 }
 
 /// `fill_memory_blocks()` from `src/core.c`, with the backend resolved from
@@ -400,7 +406,8 @@ pub fn fill_memory_blocks(instance: &Instance) -> Result<(), Error> {
 /// pass with `(pass_index, whole_arena)`, at a point where every helper is
 /// parked at the barrier and cannot touch the arena.
 ///
-/// With the `parallel` feature and `instance.threads > 1`, one
+/// With the `parallel` feature, `instance.threads > 1` and
+/// `instance.lanes > 1`, one
 /// [`std::thread::scope`] owns the helpers for the whole fill. They meet at an
 /// atomic barrier after each slice, matching the C's sync points without
 /// respawning. The single-threaded path holds no raw-pointer sharing at all, so
@@ -473,9 +480,9 @@ pub unsafe fn fill_memory_blocks_traced(
             //     `Arena::new`". That premise is false for a pooled arena with
             //     `zeroize-memory` off, and it was never the load-bearing one;
             //     *initialised* is.
-            //  3. No live `&mut Block`: every worker for the last slice has been
-            //     joined (`std::thread::scope` returned), so this shared slice is
-            //     the only reference into the arena in existence.
+            //  3. No live `&mut Block`: the parallel path returned above, and
+            //     every sequential `fill_slice_st` call has returned before
+            //     this shared slice is formed.
             //
             // Separately from soundness, the callback can never observe a
             // previous tenant's bytes even on a reused arena: it fires only
@@ -605,10 +612,11 @@ unsafe impl Send for SharedInstance<'_> {}
 /// and the leader, having finished its own lanes:
 ///
 /// ```text
-///   spin until arrived == helpers (Acquire) acquires every helper's writes
+///   spin until arrived + lost >= helpers (Acquire)
+///                                            acquires every live helper's writes
 ///   ... KAT trace here, if any: everyone is parked ...
 ///   next_lane = 0; arrived = 0
-///   generation.fetch_add(1, Release)       publishes all of it to everyone
+///   generation.store(next, Release)        publishes all of it to everyone
 /// ```
 ///
 /// The transitivity is the point. A helper's block writes happen-before its
@@ -1856,9 +1864,9 @@ fn decode_bounded(
 /// One `Hasher` per thread. It is [`Send`], so it can move to whichever worker
 /// picks up a request, and deliberately **not** [`Sync`]: two threads hashing
 /// through one `Hasher` would be two hashes sharing one arena. The multi-lane
-/// fill inside a single hash is unaffected — it still uses
-/// [`std::thread::scope`] exactly as before, over the arena this `Hasher` lent
-/// it for the duration of that one call.
+/// fill inside a single hash is unaffected — one [`std::thread::scope`] owns
+/// its helper pool for the whole fill, over the arena this `Hasher` lent it for
+/// the duration of that one call.
 ///
 /// ```compile_fail
 /// # use argon2_rust::{Algorithm, Argon2, Params, Version};
@@ -3204,12 +3212,13 @@ mod tests {
         assert!(!constant_time_eq(&[0u8; 4], &[0, 0, 0, 0x80]));
     }
 
-    /// The stable one-shot and pooled paths must leave H0 only inside the
-    /// 72-byte `blockhash` that `hash_in_arena` wipes. Copying it is reserved
-    /// for the unstable KAT API whose return value explicitly is H0.
+    /// Structural guard for the two stable call sites: neither may request the
+    /// optional H0 output copy from `hash_in_arena`. This observes that API
+    /// choice, not stack contents; the traced call below proves the counter is
+    /// live and reserves the copy for the unstable KAT API that returns H0.
     #[cfg(feature = "std")]
     #[test]
-    fn stable_hashes_do_not_copy_h0_out_of_the_wiped_blockhash() {
+    fn stable_hashes_do_not_request_an_h0_output_copy() {
         H0_COPY_COUNT.with(|count| count.set(0));
 
         let params = Params::new(32, 1, 1, 32).expect("params");
@@ -3243,6 +3252,16 @@ mod tests {
         .expect("traced hash");
         H0_COPY_COUNT.with(|count| assert_eq!(count.get(), 1, "trace did not copy H0"));
         clear_internal_memory(&mut h0);
+    }
+
+    #[test]
+    fn fill_first_blocks_rejects_a_short_internal_arena() {
+        let mut blockhash = [0xA5; PREHASH_SEED_LENGTH];
+        let mut arena = [];
+        assert_eq!(
+            fill_first_blocks(&mut blockhash, &mut arena, 1, 8),
+            Err(Error::IncorrectParameter)
+        );
     }
 
     // ------------------------------------------------------------------

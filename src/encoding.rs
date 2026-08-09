@@ -50,23 +50,23 @@
 //! * **Embedded NULs.** The C stops at the first `'\0'`; a Rust `&str` has no
 //!   terminator, so the whole slice must be consumed. This is strictly
 //!   stricter: it only rejects strings the C would have accepted by truncating.
-//! * **Bytes `>= 0x80` (a bug in the C).** `b64_char_to_byte(*src)` passes a
-//!   `char`. Where `char` is signed — Apple, x86 Linux, MSVC — every byte
+//! * **Raw and non-ASCII bytes.** The C decoder takes an arbitrary `char *`
+//!   byte string, while [`decode_string`] takes `&str`, so malformed UTF-8
+//!   cannot reach this API. The C also has a signed-`char` bug in
+//!   `b64_char_to_byte(*src)`: on Apple, x86 Linux and MSVC every byte
 //!   `>= 0x80` sign-extends to a negative `int`, and `EQ`, which its own
 //!   comment says is only valid "over values in the 0..255 range", then reports
-//!   a spurious match against both `'+'` and `'/'`. The byte decodes as 63
-//!   instead of being rejected. Measured on `aarch64-apple-darwin` against
+//!   a spurious match against both `'+'` and `'/'`. Every such byte therefore
+//!   decodes as 63 instead of being rejected. Measured on
+//!   `aarch64-apple-darwin` against
 //!   `libargon2.a`: `"$argon2i$v=19$m=65536,t=2,p=1$é9tZXNhbHQ$<tag>"` and
 //!   `"…$//9tZXNhbHQ$<tag>"` both decode, to the same salt `ff ff 6d 65 …`.
+//!   Replacing the first `/` with any single byte `0x80..=0xff`, including
+//!   malformed UTF-8, also verifies the same record on that target.
 //!   Where `char` is unsigned (aarch64 Linux) the same byte is rejected. This
 //!   port always rejects, which matches the unsigned-`char` platforms and the
 //!   evident intent, and is unreachable for any string the encoder produced.
 //!   See `b64_char_to_byte_rejects_everything_else` below.
-//! * **Password length.** `argon2_verify` fills in `ctx.pwd`/`ctx.pwdlen`
-//!   before calling `decode_string`, so the C's final `validate_inputs()` also
-//!   sees the password. [`decode_string`] validates with `pwd_len = 0`; the two
-//!   differ only for a password longer than [`crate::params::MAX_PWD_LENGTH`]
-//!   (4 GiB), which the verify path rejects a moment later anyway.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -227,7 +227,7 @@ pub const fn num_len(num: u32) -> usize {
 ///
 /// The trailing `+ 1` is the C string's NUL terminator. It is kept so the value
 /// matches the C byte for byte; a Rust [`String`] is one byte shorter. It is
-/// also exactly the buffer size [`encode_string`] wants, which reserves the
+/// also exactly the buffer size `encode_string` wants, which reserves the
 /// same byte (see there).
 ///
 /// Note the C uses `numlen(ARGON2_VERSION_NUMBER)` and not the version actually
@@ -774,8 +774,8 @@ fn decode_bin(src: &[u8], pos: &mut usize) -> Result<Vec<u8>, Error> {
 /// before accepting the string, so a well-formed string with a zero-length salt
 /// yields [`Error::SaltTooShort`] and not [`Error::DecodingFail`].
 ///
-/// See the module documentation for the three known divergences from the C
-/// (unrepresentable versions, embedded NULs, and the password length).
+/// See the module documentation for the known divergences from the C
+/// (unrepresentable versions, embedded NULs, and raw/non-ASCII input).
 pub fn decode_string(encoded: &str, algorithm: Algorithm) -> Result<Decoded, Error> {
     let src = encoded.as_bytes();
     let mut pos = 0usize;

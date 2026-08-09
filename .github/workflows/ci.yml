@@ -90,7 +90,7 @@ jobs:
       - run: cargo build --release --no-default-features --target thumbv7em-none-eabi
 
   docs:
-    name: rustdoc (all features, warnings denied)
+    name: rustdoc (default and all features, warnings denied)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -98,7 +98,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Public-to-private intra-doc links render in local private-item builds but
       # fail on docs.rs. Denying warnings keeps the published surface honest.
-      - run: cargo doc --no-deps --all-features
+      - name: Default features
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: All features
+        run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
 

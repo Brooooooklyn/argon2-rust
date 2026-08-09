@@ -1331,11 +1331,11 @@ impl Workspace {
 
     /// Wipe `arena` and park it for the next acquisition.
     ///
-    /// The wipe is [`clear_internal_memory_blocks`], gated on `zeroize-memory`
-    /// exactly as [`Arena`]'s own [`Drop`] is. On supported architectures it is
-    /// a bulk zero followed by the compiler barrier documented on
-    /// [`secure_wipe_raw`]; elsewhere it is a byte-volatile fallback. It covers
-    /// the visible blocks, precisely the window the borrower could reach.
+    /// The wipe is `Arena::wipe_visible`, gated on `zeroize-memory` exactly as
+    /// [`Arena`]'s own [`Drop`] is. It stripes large arenas across the permitted
+    /// worker count and applies [`secure_wipe_raw`] to every stripe; smaller
+    /// arenas use one stripe. It covers the visible blocks, precisely the
+    /// window the borrower could reach.
     ///
     /// If an arena is already parked, the **larger** of the two is kept and the
     /// other is freed, so a workspace never shrinks under a mixed workload.

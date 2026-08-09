@@ -13,7 +13,8 @@ C reference, OpenSSL, and the popular Rust crates, on both x86-64 and aarch64.
 - **Bit-exact with the C reference for Argon2 versions 16 and 19** — verified
   against the official KAT traces (12,304 lines of internal state per file),
   the official `test.c` vectors, and a live differential harness comparing tags
-  and C error codes over the supported parameter and canonical-PHC matrix
+  and C error codes over the supported parameter matrix; PHC strings are
+  checked against the reference vectors
 - **Runtime CPU dispatch**: AVX-512 → AVX2 → SSE2(+SSSE3) → NEON → scalar,
   cached in a single atomic; safe code can never reach an instruction set the
   CPU lacks. On wasm32 a **SIMD128** backend is selected at compile time
@@ -212,20 +213,20 @@ the CPU lacks. Explicit-backend entry points exist for testing and are
 
 The hash core is bit-exact for the two standard versions this crate represents,
 and PHC strings emitted by this crate round-trip with the C reference. Its Rust
-decoder is intentionally stricter than C on four inputs outside that ordinary
-surface:
+decoder differs from C on several inputs outside that ordinary surface:
 
 - C accepts any numeric `$v=` value because its validator does not inspect the
-  version. This crate's closed `Version` enum accepts only 16 and 19 and returns
-  `DecodingFail` otherwise.
+  version. The raw value is hashed into H0, so C can produce and verify a
+  self-consistent `$v=99` record. This crate's closed `Version` enum accepts
+  only 16 and 19 and returns `DecodingFail` otherwise.
 - C verification uses `strlen` and therefore ignores bytes after an embedded
   NUL. A Rust `&str` has an explicit length, so this crate requires the whole
   string to be consumed.
-- On targets where C `char` is signed, the reference decoder can misclassify
-  non-ASCII bytes as Base64 `/`. This crate rejects them on every target.
-- The standalone decoder validates with a zero-length password; the verify
-  entry points perform the password-length check separately. This differs only
-  for inputs larger than the C API's 4 GiB password limit.
+- The C decoder's input type is an arbitrary byte string, while Rust's `&str`
+  boundary cannot represent malformed UTF-8. On targets where C `char` is
+  signed, its decoder also misclassifies every byte `>= 0x80` in a Base64 field
+  as `/`; this crate rejects valid non-ASCII UTF-8 and cannot receive malformed
+  UTF-8.
 
 These are parser-acceptance differences, not differences in Argon2 tags for
 supported versions and canonical ASCII PHC strings.
