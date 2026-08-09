@@ -3,6 +3,7 @@
 [![CI](https://github.com/Brooooooklyn/argon2-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/Brooooooklyn/argon2-rust/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/argon2-rust.svg)](https://crates.io/crates/argon2-rust)
 [![docs.rs](https://docs.rs/argon2-rust/badge.svg)](https://docs.rs/argon2-rust)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/Brooooooklyn/argon2-rust?utm_source=badge)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 
 A pure-Rust port of the reference [Argon2](https://github.com/P-H-C/phc-winner-argon2)
@@ -271,6 +272,22 @@ cargo bench --bench micro --features internal-api -- \
 `--vs-c` loads `phc-winner-argon2/libargon2.so.1` (built with its own
 `make`) at runtime, prints the ISA genuinely inside it, and asserts tag
 equality every repetition.
+
+### Continuous benchmarking
+
+Every push and pull request runs `benches/codspeed.rs` under
+[CodSpeed](https://app.codspeed.io/Brooooooklyn/argon2-rust)'s CPU simulation
+instrument, which counts instructions, cache accesses and branches inside a CPU
+model rather than timing a shared runner. That is a different question from the
+tables above — it is a *regression net*, not a speed claim — so the suite is
+deliberately small, single-threaded and hermetic: the cost sweep, the three
+variants, both versions, each fill backend the runner advertises, arena reuse,
+the PHC string layer, BLAKE2b, and the dispatch load.
+
+```console
+cargo codspeed build --bench codspeed
+codspeed run --mode simulation -- cargo codspeed run --bench codspeed
+```
 
 ## License
 

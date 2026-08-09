@@ -93,10 +93,18 @@ argon2-rust = { path = ".", default-features = false, features = ["internal-api"
 # target runs there anyway — `cargo test --target wasm32-wasip1` covers the
 # library and the integration tests, never the benches.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+codspeed-criterion-compat = { version = "5.0.1", features = ["html_reports"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "argon2"
+harness = false
+
+# The CI regression net, measured by CodSpeed's simulation instrument. Small,
+# hermetic and single-threaded on purpose — see the module docs in
+# `benches/codspeed.rs` for why it does not simply reuse the sweep above.
+[[bench]]
+name = "codspeed"
 harness = false
 
 # The fast iteration harness. Criterion is the right tool for a publishable
