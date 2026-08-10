@@ -1339,7 +1339,7 @@ pub(crate) mod test_support {
         out: &mut [u8],
     ) -> Result<(), Error> {
         params.validate_for(pwd.len(), salt.len(), 0, 0)?;
-        if out.len() != params.output_len() {
+        if out.len() != params.tag_len_bytes() {
             return Err(Error::OutPtrMismatch);
         }
 

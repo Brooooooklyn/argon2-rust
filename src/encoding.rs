@@ -73,7 +73,7 @@ use alloc::vec::Vec;
 
 use crate::base64::Base64Backend;
 use crate::error::Error;
-use crate::params::{Algorithm, Params, Version, validate_inputs};
+use crate::params::{Algorithm, Memory, Params, TagLen, Version, validate_inputs};
 
 // ---------------------------------------------------------------------------
 // Constant-time classification (encoding.c lines 74-78)
@@ -242,14 +242,30 @@ pub const fn num_len(num: u32) -> usize {
 ///
 /// # Argument order
 ///
-/// `t_cost` comes before `m_cost` here, which is the reverse of
-/// [`Params::new`]:
+/// `t_cost` comes before `m_cost` here, which is the opposite of the order a
+/// PHC string carries them in:
 ///
 /// ```text
-/// Params::new(m_cost, t_cost, lanes, output_len)
+/// $argon2id$v=19$m=65536,t=3,p=1$<salt>$<tag>
+///                ^^^^^^^^^^^^^^^ the string reads m, then t, then p
 /// encoded_len(algorithm, t_cost, m_cost, lanes, salt_len, hash_len)
-///                        ^^^^^^^^^^^^^^ reversed against Params::new
+///                        ^^^^^^^^^^^^^^ this call reads t, then m
 /// ```
+///
+/// So a call transcribed field by field off a string is a call with the two
+/// costs swapped. Here that is harmless, and provably so rather than by luck:
+/// the result is a plain sum of `num_len(t_cost)` and `num_len(m_cost)`, so it
+/// does not depend on which digit count came from which cost — pinned at every
+/// digit-count boundary by `encoded_len_is_symmetric_in_m_and_t`.
+///
+/// The transposition is not harmless anywhere that hashes, and the decoder
+/// behind [`Argon2::verify_encoded`](crate::Argon2::verify_encoded) is where it
+/// would bite: `m=` must become the memory cost and `t=` the pass count, never
+/// the other way round, or a string verifies against a tag its writer never
+/// produced. [`Params`] itself is built through named setters —
+/// [`ParamsBuilder::memory`](crate::params::ParamsBuilder::memory) and
+/// [`ParamsBuilder::passes`](crate::params::ParamsBuilder::passes) — so there is
+/// no order to get wrong on that side. This function is the positional one.
 ///
 /// The order is the C's, kept so a call can be transcribed position for
 /// position: `argon2_encodedlen(t_cost, m_cost, parallelism, saltlen, hashlen,
@@ -262,22 +278,29 @@ pub const fn num_len(num: u32) -> usize {
 /// side; the verify family keeps the C's trailing `type` and takes it last.
 ///
 /// ```
-/// use argon2_rust::{Algorithm, Params, encoded_len};
+/// use argon2_rust::{Algorithm, Params, encoded_len, params::{Memory, TagLen}};
 ///
-/// // Params::new takes m_cost first.
-/// let params = Params::new(65536, 3, 1, 32).unwrap();
-/// assert_eq!((params.m_cost(), params.t_cost()), (65536, 3));
+/// // The builder names each cost, so nothing here has an order to reverse.
+/// let params = Params::builder()
+///     .memory(Memory::kib(65536))
+///     .passes(3)
+///     .lanes(1)
+///     .tag_len(TagLen::bytes(32))
+///     .build()?;
+/// assert_eq!((params.memory_kib(), params.passes()), (65536, 3));
 ///
-/// // encoded_len takes t_cost first: the same two costs, the other way round.
+/// // `encoded_len` is positional, and it takes t_cost first: the same two
+/// // costs, the other way round from the `m=65536,t=3` the string will show.
 /// let n = encoded_len(
 ///     Algorithm::Argon2id,
-///     params.t_cost(),
-///     params.m_cost(),
+///     params.passes(),
+///     params.memory_kib(),
 ///     params.lanes(),
 ///     16, // salt_len
 ///     32, // hash_len
 /// );
 /// assert_eq!(n, 98);
+/// # Ok::<(), argon2_rust::Error>(())
 /// ```
 ///
 /// # Against a string the crate really produced
@@ -288,13 +311,22 @@ pub const fn num_len(num: u32) -> usize {
 /// `encode_needs_encoded_len_bytes_exactly`:
 ///
 /// ```
-/// use argon2_rust::{Algorithm, Argon2, Params, Version, encoded_len};
+/// use argon2_rust::{
+///     Algorithm, Argon2, Params, Version, encoded_len,
+///     params::{Memory, TagLen},
+/// };
 ///
-/// let params = Params::new(64, 1, 1, 32)?;
+/// let params = Params::builder()
+///     .memory(Memory::kib(64))
+///     .passes(1)
+///     .lanes(1)
+///     .tag_len(TagLen::bytes(32))
+///     .build()?;
 /// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 /// let encoded = argon2.hash_encoded(b"password", b"somesalt")?;
 ///
 /// // `salt_len` is the salt's own 8 bytes, not the 11 its base64 occupies.
+/// // Note the `1, 64` against the string's `m=64,t=1`: t_cost comes first.
 /// let n = encoded_len(Algorithm::Argon2id, 1, 64, 1, 8, 32);
 /// assert_eq!(n, 84);
 /// assert_eq!(encoded.len(), n - 1);
@@ -679,8 +711,8 @@ fn validate_for_string(params: &Params, salt_len: usize, hash_len: usize) -> Res
         salt_len,
         0,
         0,
-        params.m_cost(),
-        params.t_cost(),
+        params.memory_kib(),
+        params.passes(),
         params.lanes(),
         params.threads(),
     )
@@ -697,7 +729,7 @@ fn validate_for_string(params: &Params, salt_len: usize, hash_len: usize) -> Res
 /// C alike.
 ///
 /// `hash.len()` plays the role of `ctx->outlen` — it is the length that gets
-/// encoded, so it, and not [`Params::output_len`], is what the leading
+/// encoded, so it, and not [`Params::tag_len_bytes`], is what the leading
 /// `validate_inputs()` checks. For a tag produced from these `params` the two
 /// are the same value.
 ///
@@ -725,9 +757,9 @@ pub fn encode_string(
     w.put_u32(version.as_u32())?;
 
     w.put(b"$m=")?;
-    w.put_u32(params.m_cost())?;
+    w.put_u32(params.memory_kib())?;
     w.put(b",t=")?;
-    w.put_u32(params.t_cost())?;
+    w.put_u32(params.passes())?;
     w.put(b",p=")?;
     w.put_u32(params.lanes())?;
 
@@ -759,8 +791,8 @@ pub fn encode_string_alloc(
 
     let capacity = encoded_len_usize(
         algorithm,
-        params.t_cost(),
-        params.m_cost(),
+        params.passes(),
+        params.memory_kib(),
         params.lanes(),
         salt.len(),
         hash.len(),
@@ -944,9 +976,25 @@ pub fn decode_string(encoded: &str, algorithm: Algorithm) -> Result<Decoded, Err
     // Last, so that every error code above still matches the C exactly.
     let version = Version::from_u32(version_value).ok_or(Error::DecodingFail)?;
 
-    // Cannot fail: `validate_inputs` above already accepted these values, and
-    // `Params` re-checks them with a salt length that is valid by construction.
-    let params = Params::new_with_threads(m_cost, t_cost, lanes, threads, hash.len())?;
+    // Attacker-chosen values from the string, through the same validation any
+    // caller's parameters get. Both conversions into the typed units widen —
+    // `m_cost` is a `u32`, and `hash.len()` is a `usize` — so neither can lose a
+    // bit before `build()` range-checks it.
+    //
+    // `build()` cannot actually reject anything here: `validate_inputs` above
+    // already accepted this `m_cost`, `t_cost`, `lanes`, `threads` and
+    // `hash.len()`, and `build()` re-runs exactly that check with a salt length
+    // that is valid by construction. Propagating rather than unwrapping keeps
+    // that a fact about today's checks instead of an assumption baked into a
+    // panic. Named setters also mean `m=` cannot land in the pass count: `m=`
+    // was parsed into `m_cost` above and only `.memory()` receives it.
+    let params = Params::builder()
+        .memory(Memory::kib(u64::from(m_cost)))
+        .passes(t_cost)
+        .lanes(lanes)
+        .threads(threads)
+        .tag_len(TagLen::bytes(hash.len() as u64))
+        .build()?;
 
     Ok(Decoded {
         algorithm,
@@ -1611,10 +1659,10 @@ mod tests {
         let d = decode_string(V13_ARGON2I, Algorithm::Argon2i).unwrap();
         assert_eq!(d.algorithm, Algorithm::Argon2i);
         assert_eq!(d.version, Version::V0x13);
-        assert_eq!(d.params.m_cost(), 65536);
-        assert_eq!(d.params.t_cost(), 2);
+        assert_eq!(d.params.memory_kib(), 65536);
+        assert_eq!(d.params.passes(), 2);
         assert_eq!(d.params.lanes(), 1);
-        assert_eq!(d.params.output_len(), 32);
+        assert_eq!(d.params.tag_len_bytes(), 32);
         assert_eq!(d.salt, b"somesalt");
         assert_eq!(
             d.hash,
@@ -1889,6 +1937,6 @@ mod tests {
         let d = decode_string(&encoded, Algorithm::Argon2d).unwrap();
         assert_eq!(d.salt, salt);
         assert_eq!(d.hash, tag);
-        assert_eq!(d.params.output_len(), tag.len());
+        assert_eq!(d.params.tag_len_bytes(), tag.len());
     }
 }

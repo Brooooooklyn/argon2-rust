@@ -88,7 +88,7 @@ pub enum Error {
     /// `ARGON2_INCORRECT_TYPE` (-26). Unreachable: [`crate::Algorithm`] is a closed enum.
     IncorrectType = -26,
     /// `ARGON2_OUT_PTR_MISMATCH` (-27). The output slice length disagrees with
-    /// [`crate::Params::output_len`]. The C never returns this code — its `out`
+    /// [`crate::Params::tag_len_bytes`]. The C never returns this code — its `out`
     /// and `outlen` travel together — so the crate reuses it for this
     /// Rust-only condition.
     OutPtrMismatch = -27,

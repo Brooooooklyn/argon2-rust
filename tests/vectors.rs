@@ -1360,7 +1360,7 @@ fn bounded_verify_rejects_an_oversized_salt_before_decoding() {
     );
 }
 
-/// A tag that clears the length gate but still exceeds `ceiling.output_len()`
+/// A tag that clears the length gate but still exceeds `ceiling.tag_len_bytes()`
 /// must be refused too — the ceiling is four numbers and all four count.
 #[test]
 fn bounded_verify_enforces_the_output_length_ceiling() {

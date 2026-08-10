@@ -269,9 +269,9 @@ fn initial_hash_into(
 
     // core.c:549-565. Six u32 parameters, in this exact order.
     state.update(&params.lanes().to_le_bytes());
-    state.update(&le32(params.output_len()));
-    state.update(&params.m_cost().to_le_bytes());
-    state.update(&params.t_cost().to_le_bytes());
+    state.update(&le32(params.tag_len_bytes()));
+    state.update(&params.memory_kib().to_le_bytes());
+    state.update(&params.passes().to_le_bytes());
     state.update(&version.as_u32().to_le_bytes());
     state.update(&algorithm.as_u32().to_le_bytes());
 
@@ -1189,7 +1189,7 @@ impl Argon2 {
 
     /// Derive a tag into `out`.
     ///
-    /// `out.len()` must equal [`Params::output_len`].
+    /// `out.len()` must equal [`Params::tag_len_bytes`].
     ///
     /// ```
     /// use argon2_rust::{Algorithm, Argon2, Error, Params, Version};
@@ -1207,7 +1207,7 @@ impl Argon2 {
     ///     "$argon2id$v=19$m=64,t=1,p=1$c29tZXNhbHQ$cpx6VEQbwTVZvcpxNIxOVUWZ5xnAipUmAe1cg2GMG70",
     /// );
     ///
-    /// // `out.len()` is checked against `Params::output_len`, never used to
+    /// // `out.len()` is checked against `Params::tag_len_bytes`, never used to
     /// // size the tag: a buffer of the wrong length is an error, not a
     /// // truncated hash.
     /// let mut too_short = [0u8; 16];
@@ -1221,7 +1221,7 @@ impl Argon2 {
     /// # Errors
     ///
     /// Whatever [`Params::validate_for`] returns, [`Error::OutPtrMismatch`] if
-    /// `out.len()` disagrees with `params.output_len()`, or
+    /// `out.len()` disagrees with `params.tag_len_bytes()`, or
     /// [`Error::MemoryAllocationError`].
     pub fn hash_into(&self, pwd: &[u8], salt: &[u8], out: &mut [u8]) -> Result<(), Error> {
         self.hash_into_with_ad(pwd, salt, &[], &[], out)
@@ -1263,7 +1263,7 @@ impl Argon2 {
         }
     }
 
-    /// Derive a tag of [`Params::output_len`] bytes.
+    /// Derive a tag of [`Params::tag_len_bytes`] bytes.
     ///
     /// ```
     /// use argon2_rust::{Algorithm, Argon2, Params, Version};
@@ -1274,7 +1274,7 @@ impl Argon2 {
     /// // The `Vec` is sized from the parameters, so there is no buffer to get
     /// // wrong and no `Error::OutPtrMismatch` to handle.
     /// let tag = argon2.hash(b"password", b"somesalt")?;
-    /// assert_eq!(tag.len(), argon2.params().output_len());
+    /// assert_eq!(tag.len(), argon2.params().tag_len_bytes());
     ///
     /// // Byte for byte what `hash_into` writes into a buffer you own; this is
     /// // the same function with the allocation moved inside.
@@ -1288,7 +1288,7 @@ impl Argon2 {
     ///
     /// As [`Argon2::hash_into`].
     pub fn hash(&self, pwd: &[u8], salt: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut out = try_zeroed_vec(self.params.output_len())?;
+        let mut out = try_zeroed_vec(self.params.tag_len_bytes())?;
         self.hash_into(pwd, salt, &mut out)?;
         Ok(out)
     }
@@ -1368,7 +1368,7 @@ impl Argon2 {
     ///
     /// As [`Argon2::hash_into`], or [`Error::VerifyMismatch`].
     pub fn verify(&self, pwd: &[u8], salt: &[u8], expected: &[u8]) -> Result<(), Error> {
-        let mut computed = try_zeroed_vec(self.params.output_len())?;
+        let mut computed = try_zeroed_vec(self.params.tag_len_bytes())?;
         let result = self.hash_into(pwd, salt, &mut computed);
         // argon2.c:349 `argon2_compare(hash, context->out, context->outlen)`.
         let matched = result.is_ok() && constant_time_eq(&computed, expected);
@@ -1429,7 +1429,7 @@ impl Argon2 {
 
         // argon2.c:302 `argon2_verify_ctx(&ctx, desired_result, type)`.
         let argon2 = Argon2::new(decoded.algorithm, decoded.version, decoded.params);
-        let mut computed = try_zeroed_vec(argon2.params.output_len())?;
+        let mut computed = try_zeroed_vec(argon2.params.tag_len_bytes())?;
         let result =
             argon2.hash_into_with_ad(pwd, &decoded.salt, secret, ad, &mut computed);
         let matched = result.is_ok() && constant_time_eq(&computed, &decoded.hash);
@@ -1478,7 +1478,7 @@ impl Argon2 {
     /// `argon2_hash()` with `hash != NULL` (`argon2.c:160`). The same function
     /// as [`Argon2::hash_into`]: `_into` picks the destination, and the format
     /// that comes with it is bytes. `out.len()` must equal
-    /// [`Params::output_len`]. For the PHC string, [`Argon2::hash_password`].
+    /// [`Params::tag_len_bytes`]. For the PHC string, [`Argon2::hash_password`].
     ///
     /// # Errors
     ///
@@ -1627,9 +1627,9 @@ impl Argon2 {
     /// and reusing the C's own codes rather than inventing new ones —
     /// [`Error::DecodingLengthFail`] if `encoded` is longer than `ceiling` could
     /// have produced, [`Error::OutputTooLong`] if the decoded tag is longer than
-    /// `ceiling.output_len()`, [`Error::MemoryTooMuch`] if the decoded `m_cost`
-    /// exceeds `ceiling.m_cost()`, [`Error::TimeTooLarge`] if `t_cost` exceeds
-    /// `ceiling.t_cost()`, and [`Error::LanesTooMany`] if `lanes` exceeds
+    /// `ceiling.tag_len_bytes()`, [`Error::MemoryTooMuch`] if the decoded `m_cost`
+    /// exceeds `ceiling.memory_kib()`, [`Error::TimeTooLarge`] if `t_cost` exceeds
+    /// `ceiling.passes()`, and [`Error::LanesTooMany`] if `lanes` exceeds
     /// `ceiling.lanes()`.
     pub fn verify_encoded_bounded(
         encoded: &str,
@@ -1677,7 +1677,7 @@ impl Argon2 {
         let decoded = decode_bounded(encoded, algorithm, ceiling)?;
 
         let argon2 = Argon2::new(decoded.algorithm, decoded.version, decoded.params);
-        let mut computed = try_zeroed_vec(argon2.params.output_len())?;
+        let mut computed = try_zeroed_vec(argon2.params.tag_len_bytes())?;
         let result = argon2.hash_into_with_ad(pwd, &decoded.salt, secret, ad, &mut computed);
         let matched = result.is_ok() && constant_time_eq(&computed, &decoded.hash);
         clear_internal_memory(&mut computed);
@@ -1702,12 +1702,12 @@ impl Argon2 {
 /// an allocator spy against the previous version: a well-formed string with
 /// `m=8,t=1,p=1` and a 16 MiB Base64 tag peaked at **36 MiB** of live
 /// allocation, then ran a full Argon2 and a 12 MiB comparison — under a ceiling
-/// whose `output_len` was 32. Every cost was inside the ceiling; the tag was
+/// whose tag length was 32 bytes. Every cost was inside the ceiling; the tag was
 /// never looked at.
 ///
 /// So the size of the string is checked against what the ceiling could
 /// legitimately produce *before* anything is parsed, and the decoded tag length
-/// is then checked against `ceiling.output_len()` as well. A ceiling is four
+/// is then checked against `ceiling.tag_len_bytes()` as well. A ceiling is four
 /// numbers, and all four now mean something.
 fn decode_bounded(
     encoded: &str,
@@ -1720,12 +1720,12 @@ fn decode_bounded(
     // C's NUL, so this is permissive by exactly one byte.
     let max_encoded = crate::encoding::encoded_len(
         algorithm,
-        ceiling.t_cost(),
-        ceiling.m_cost(),
+        ceiling.passes(),
+        ceiling.memory_kib(),
         ceiling.lanes(),
         BOUNDED_MAX_SALT_LEN,
-        // `output_len` is bounded by MAX_OUTLEN, so this cast cannot truncate.
-        ceiling.output_len() as u32,
+        // The tag length is bounded by MAX_OUTLEN, so this cast cannot truncate.
+        ceiling.tag_len_bytes() as u32,
     );
     if encoded.len() > max_encoded {
         // ARGON2_DECODING_LENGTH_FAIL: "Some of encoded parameters are too long
@@ -1736,13 +1736,13 @@ fn decode_bounded(
 
     let mut decoded = crate::encoding::decode_string(encoded, algorithm)?;
 
-    if decoded.params.output_len() > ceiling.output_len() {
+    if decoded.params.tag_len_bytes() > ceiling.tag_len_bytes() {
         return Err(Error::OutputTooLong);
     }
-    if decoded.params.m_cost() > ceiling.m_cost() {
+    if decoded.params.memory_kib() > ceiling.memory_kib() {
         return Err(Error::MemoryTooMuch);
     }
-    if decoded.params.t_cost() > ceiling.t_cost() {
+    if decoded.params.passes() > ceiling.passes() {
         return Err(Error::TimeTooLarge);
     }
     if decoded.params.lanes() > ceiling.lanes() {
@@ -1769,11 +1769,11 @@ fn decode_bounded(
     let threads = ceiling.threads().min(decoded.params.lanes());
     if threads != decoded.params.threads() {
         decoded.params = Params::new_with_threads(
-            decoded.params.m_cost(),
-            decoded.params.t_cost(),
+            decoded.params.memory_kib(),
+            decoded.params.passes(),
             decoded.params.lanes(),
             threads,
-            decoded.params.output_len(),
+            decoded.params.tag_len_bytes(),
         )?;
     }
     Ok(decoded)
@@ -2016,7 +2016,7 @@ impl Hasher {
     ///
     /// As [`Argon2::hash_into`].
     pub fn hash(&mut self, pwd: &[u8], salt: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut out = try_zeroed_vec(self.argon2.params.output_len())?;
+        let mut out = try_zeroed_vec(self.argon2.params.tag_len_bytes())?;
         self.hash_into(pwd, salt, &mut out)?;
         Ok(out)
     }
@@ -2177,7 +2177,7 @@ impl Hasher {
         if decoded.params.memory_blocks() as usize > self.pooled_ceiling() {
             // As `verify_encoded`: keep an attacker-chosen `m_cost` off the
             // pooled arena by running on a one-shot arena instead.
-            let mut computed = try_zeroed_vec(argon2.params.output_len())?;
+            let mut computed = try_zeroed_vec(argon2.params.tag_len_bytes())?;
             let result =
                 argon2.hash_into_with_ad(pwd, &decoded.salt, secret, ad, &mut computed);
             let matched = result.is_ok() && constant_time_eq(&computed, &decoded.hash);
@@ -2200,7 +2200,7 @@ impl Hasher {
     ///
     /// [`Argon2::hash_password_into`] over pooled memory, which is the same
     /// function as [`Hasher::hash_into`]. `out.len()` must equal
-    /// [`Params::output_len`]. For the PHC string, [`Hasher::hash_password`].
+    /// [`Params::tag_len_bytes`]. For the PHC string, [`Hasher::hash_password`].
     ///
     /// # Errors
     ///
@@ -2345,7 +2345,7 @@ impl Hasher {
         if decoded.params.memory_blocks() as usize > self.pooled_ceiling() {
             // As `verify_encoded_with_ad`: an m_cost this hasher's owner never
             // asked for runs on a one-shot arena.
-            let mut computed = try_zeroed_vec(argon2.params.output_len())?;
+            let mut computed = try_zeroed_vec(argon2.params.tag_len_bytes())?;
             let result = argon2.hash_into_with_ad(pwd, &decoded.salt, secret, ad, &mut computed);
             let matched = result.is_ok() && constant_time_eq(&computed, &decoded.hash);
             clear_internal_memory(&mut computed);
@@ -2446,7 +2446,7 @@ impl Hasher {
         ad: &[u8],
         expected: &[u8],
     ) -> Result<(), Error> {
-        let mut computed = try_zeroed_vec(argon2.params.output_len())?;
+        let mut computed = try_zeroed_vec(argon2.params.tag_len_bytes())?;
         let result = self.hash_into_using(argon2, pwd, salt, secret, ad, &mut computed);
         // argon2.c:349 `argon2_compare(hash, context->out, context->outlen)`.
         let matched = result.is_ok() && constant_time_eq(&computed, expected);
@@ -2641,7 +2641,7 @@ fn validate_and_size(
     // object; here the buffer and the configured length are separate, so they
     // can disagree. `ARGON2_OUT_PTR_MISMATCH` is defined in `argon2.h` but
     // never returned by the C, which makes it exactly the right code for this.
-    if out.len() != params.output_len() {
+    if out.len() != params.tag_len_bytes() {
         return Err(Error::OutPtrMismatch);
     }
 
@@ -3823,8 +3823,8 @@ mod tests {
 
                 for round in 0..4u8 {
                     let pwd = [round; 7];
-                    let mut want = alloc::vec![0u8; params.output_len()];
-                    let mut got = alloc::vec![0u8; params.output_len()];
+                    let mut want = alloc::vec![0u8; params.tag_len_bytes()];
+                    let mut got = alloc::vec![0u8; params.tag_len_bytes()];
 
                     argon2.hash_into(&pwd, b"somesalt", &mut want).expect("one");
                     hasher.hash_into(&pwd, b"somesalt", &mut got).expect("pool");
@@ -4047,7 +4047,7 @@ mod tests {
         for (params, label) in [(small, "small"), (large, "large"), (small, "small again")] {
             let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
             hasher.set_argon2(argon2);
-            assert_eq!(hasher.params().m_cost(), params.m_cost(), "{label}");
+            assert_eq!(hasher.params().memory_kib(), params.memory_kib(), "{label}");
             assert_eq!(hasher.algorithm(), Algorithm::Argon2id);
             assert_eq!(hasher.version(), Version::V0x13);
             assert_eq!(hasher.argon2(), &argon2);

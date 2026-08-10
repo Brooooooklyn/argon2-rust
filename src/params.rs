@@ -403,7 +403,7 @@ impl Version {
 ///
 /// This free function is the escape hatch, not the main path.
 /// [`Params::validate_for`] calls it with five of the nine arguments filled in
-/// from the receiver: the tag length (`out_len`, from [`Params::output_len`])
+/// from the receiver: the tag length (`out_len`, from [`Params::tag_len_bytes`])
 /// and the four cost values (`m_cost`, `t_cost`, `lanes`, `threads`). It leaves
 /// the caller exactly the four buffer lengths, `pwd_len`, `salt_len`,
 /// `secret_len` and `ad_len`. Those five values come from a [`Params`] that a
@@ -444,7 +444,7 @@ impl Version {
 ///
 /// // The method form cannot be told that. `out_len` is not one of its four
 /// // arguments; it comes from the `Params`, which holds it at 32.
-/// assert_eq!(params.output_len(), 32);
+/// assert_eq!(params.tag_len_bytes(), 32);
 /// assert_eq!(params.validate_for(32, 16, 0, 0), Ok(()));
 /// # Ok::<(), Error>(())
 /// ```
@@ -979,20 +979,6 @@ impl Params {
         )
     }
 
-    /// Requested memory in KiB (`context.m_cost`).
-    #[inline]
-    #[must_use]
-    pub const fn m_cost(&self) -> u32 {
-        self.m_cost
-    }
-
-    /// Number of passes (`context.t_cost`, `instance.passes`).
-    #[inline]
-    #[must_use]
-    pub const fn t_cost(&self) -> u32 {
-        self.t_cost
-    }
-
     /// Degree of parallelism (`context.lanes`). Affects the tag.
     #[inline]
     #[must_use]
@@ -1005,13 +991,6 @@ impl Params {
     #[must_use]
     pub const fn threads(&self) -> u32 {
         self.threads
-    }
-
-    /// Tag length in bytes (`context.outlen`).
-    #[inline]
-    #[must_use]
-    pub const fn output_len(&self) -> usize {
-        self.output_len as usize
     }
 
     /// `min(threads, lanes)`, as `argon2_ctx` computes it.

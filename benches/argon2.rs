@@ -529,7 +529,7 @@ fn rust_hash(backend: Backend, algorithm: Algorithm, p: &Params, out: &mut [u8; 
 /// Bytes of memory the algorithm touches per hash: the *aligned* block count,
 /// not the requested `m_cost`, times the number of passes.
 fn throughput_of(p: &Params) -> Throughput {
-    Throughput::Bytes(u64::from(p.memory_blocks()) * 1024 * u64::from(p.t_cost()))
+    Throughput::Bytes(u64::from(p.memory_blocks()) * 1024 * u64::from(p.passes()))
 }
 
 /// Very rough wall-clock estimate, used only to pick sample counts so the sweep
@@ -540,7 +540,7 @@ fn est_millis(p: &Params) -> f64 {
     const MS_PER_KIB_PER_PASS: f64 = 0.000_40;
     let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZero::get) as f64;
     let parallel = f64::from(p.effective_threads()).min(cpus);
-    let serial = f64::from(p.memory_blocks()) * f64::from(p.t_cost()) * MS_PER_KIB_PER_PASS;
+    let serial = f64::from(p.memory_blocks()) * f64::from(p.passes()) * MS_PER_KIB_PER_PASS;
     // 1.3 covers imperfect scaling; floor at 1 so tiny cases stay sane.
     (serial / parallel * 1.3).max(0.001)
 }

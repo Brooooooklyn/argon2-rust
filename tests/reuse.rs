@@ -117,11 +117,11 @@ impl std::fmt::Debug for Case {
              pwd[{}] salt[{}] secret[{}] ad[{}]",
             self.algorithm,
             self.version.as_u32(),
-            self.params.m_cost(),
-            self.params.t_cost(),
+            self.params.memory_kib(),
+            self.params.passes(),
             self.params.lanes(),
             self.params.threads(),
-            self.params.output_len(),
+            self.params.tag_len_bytes(),
             self.params.memory_blocks(),
             self.pwd.len(),
             self.salt.len(),
@@ -144,7 +144,7 @@ impl Case {
     /// this returns. Every pooled tag in this file is compared against one of
     /// these.
     fn one_shot(&self) -> Vec<u8> {
-        let mut out = vec![0u8; self.params.output_len()];
+        let mut out = vec![0u8; self.params.tag_len_bytes()];
         self.argon2()
             .hash_into_with_ad(&self.pwd, &self.salt, &self.secret, &self.ad, &mut out)
             .unwrap_or_else(|e| panic!("one-shot hash failed for {self:?}: {e:?}"));
@@ -154,7 +154,7 @@ impl Case {
 
 /// Point a hasher at `case`'s configuration and run it, returning the tag.
 fn hash_case(hasher: &mut Hasher, case: &Case) -> Result<Vec<u8>, Error> {
-    let mut out = vec![0u8; case.params.output_len()];
+    let mut out = vec![0u8; case.params.tag_len_bytes()];
     hasher.set_argon2(case.argon2());
     hasher
         .hash_into_with_ad(&case.pwd, &case.salt, &case.secret, &case.ad, &mut out)
@@ -648,7 +648,7 @@ fn a_rejected_input_leaves_the_hasher_correct() {
     let reserved = hasher.reserved_blocks();
     assert_eq!(reserved, good.blocks());
 
-    // (a) `out.len()` disagrees with `params.output_len()`.
+    // (a) `out.len()` disagrees with `params.tag_len_bytes()`.
     let mut too_short = [0u8; 16];
     assert_eq!(
         hasher.hash_into(&good.pwd, &good.salt, &mut too_short),

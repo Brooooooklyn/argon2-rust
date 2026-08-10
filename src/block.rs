@@ -278,7 +278,7 @@ impl Instance {
             memory,
             memory_len,
             version,
-            passes: params.t_cost(),
+            passes: params.passes(),
             memory_blocks,
             segment_length,
             lane_length,

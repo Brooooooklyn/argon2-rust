@@ -334,7 +334,7 @@ fn make_params(m_cost: u32, t_cost: u32, lanes: u32, threads: u32) -> Params {
 /// lane on every pass, less the two per lane that `fill_first_blocks` already
 /// produced and pass 0 / slice 0 therefore skips.
 fn blocks_per_fill(p: &Params) -> u64 {
-    u64::from(p.memory_blocks()) * u64::from(p.t_cost()) - 2 * u64::from(p.lanes())
+    u64::from(p.memory_blocks()) * u64::from(p.passes()) - 2 * u64::from(p.lanes())
 }
 
 /// A seeded arena plus the `Instance` over it, rebuilt between reps.
@@ -470,14 +470,14 @@ fn time_segments(
     reps: usize,
     warmup: usize,
 ) -> Vec<SegBucket> {
-    let st = make_params(p.m_cost(), p.t_cost(), p.lanes(), 1);
+    let st = make_params(p.memory_kib(), p.passes(), p.lanes(), 1);
     let mut bed = Bed::new(alg, &st);
     let fill = fill_segment_fn(backend);
     let seg_len = u64::from(st.segment_length());
     let lanes = u64::from(st.lanes());
 
     let mut buckets: Vec<SegBucket> = Vec::new();
-    for pass in 0..st.t_cost() {
+    for pass in 0..st.passes() {
         for slice in 0..SYNC_POINTS {
             let first = pass == 0 && slice == 0;
             buckets.push(SegBucket {
@@ -731,8 +731,8 @@ fn run_stages(a: &Args) {
     let total: f64 = rows.iter().map(|(_, v)| median(v)).sum();
     println!(
         "  m={} t={} p={} threads={} backend={}   ({} reps + {} warmup)",
-        p.m_cost(),
-        p.t_cost(),
+        p.memory_kib(),
+        p.passes(),
         p.lanes(),
         p.threads(),
         a.backend,
@@ -958,8 +958,8 @@ fn c_hash(f: cref::Argon2Hash, alg: Algorithm, p: &Params, out: &mut [u8; OUTLEN
     // `argon2_hash` documents as "raw hash only".
     let rc = unsafe {
         f(
-            p.t_cost(),
-            p.m_cost(),
+            p.passes(),
+            p.memory_kib(),
             p.lanes(),
             PWD.as_ptr().cast::<c_void>(),
             PWD.len(),
@@ -1053,8 +1053,8 @@ fn report_one(a: &Args, p: &Params, ms: &[f64], label: &str) {
             "{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.2},{:.2}",
             a.backend.name(),
             label,
-            p.m_cost(),
-            p.t_cost(),
+            p.memory_kib(),
+            p.passes(),
             p.lanes(),
             p.threads(),
             med,
@@ -1067,8 +1067,8 @@ fn report_one(a: &Args, p: &Params, ms: &[f64], label: &str) {
     }
     println!(
         "  m={:<7} t={} p={} threads={}  blocks={}",
-        p.m_cost(),
-        p.t_cost(),
+        p.memory_kib(),
+        p.passes(),
         p.lanes(),
         p.threads(),
         blocks
@@ -1103,8 +1103,8 @@ fn run_single(a: &Args) {
                 println!(
                     "  m={:<7} t={} p={}   ours {o:>8.2} ms (spread {:.2}%)   \
                      c {t:>8.2} ms (spread {:.2}%)   ours/c {:.3}x",
-                    p.m_cost(),
-                    p.t_cost(),
+                    p.memory_kib(),
+                    p.passes(),
                     p.lanes(),
                     spread_pct(&ours),
                     spread_pct(&theirs),
@@ -1122,8 +1122,8 @@ fn run_single(a: &Args) {
             let buckets = time_segments(a.backend, a.alg, &p, a.reps, a.warmup);
             println!(
                 "  m={} t={} p={} (forced single-threaded), {:?}",
-                p.m_cost(),
-                p.t_cost(),
+                p.memory_kib(),
+                p.passes(),
                 p.lanes(),
                 a.alg
             );
