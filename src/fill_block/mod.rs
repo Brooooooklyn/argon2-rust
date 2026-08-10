@@ -74,8 +74,13 @@ pub mod wasm128;
 // ---------------------------------------------------------------------------
 
 /// Which `fill_segment` implementation to use.
+///
+/// A variant is added every time another ISA is ported, so this is
+/// `#[non_exhaustive]` — write a `_` arm downstream. [`Backend::ALL`] is a
+/// slice for the same reason: its length must not be part of the API.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum Backend {
     /// Portable scalar code. Always available.
     Scalar = 0,
@@ -106,7 +111,7 @@ pub type FillSegmentFn = unsafe fn(&Instance, Position);
 
 impl Backend {
     /// Every backend, in ascending preference order.
-    pub const ALL: [Backend; 6] = [
+    pub const ALL: &'static [Backend] = &[
         Backend::Scalar,
         Backend::Neon,
         Backend::Sse2,
@@ -480,7 +485,7 @@ mod tests {
 
     #[test]
     fn backend_u8_round_trip() {
-        for b in Backend::ALL {
+        for &b in Backend::ALL {
             assert_eq!(Backend::from_u8(b.to_u8()), b);
         }
         // The sentinel and anything unknown must degrade, never panic.
@@ -542,7 +547,7 @@ mod tests {
 
     #[test]
     fn every_backend_resolves_to_a_function() {
-        for b in Backend::ALL {
+        for &b in Backend::ALL {
             let f = fill_segment_fn(b);
             // Compare as raw addresses; only Scalar is guaranteed to be itself.
             let scalar = fill_segment_fn(Backend::Scalar);

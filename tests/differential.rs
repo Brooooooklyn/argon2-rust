@@ -578,7 +578,8 @@ fn drivers() -> Vec<Driver> {
     let mut drivers = vec![Driver::PublicApi, Driver::Pooled];
     drivers.extend(
         Backend::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|b| b.is_available())
             .map(Driver::Forced),
     );

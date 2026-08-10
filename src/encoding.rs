@@ -258,38 +258,8 @@ pub const fn num_len(num: u32) -> usize {
 /// The other five kept their order among themselves; `parallelism` is spelled
 /// `lanes` here, the name [`Params`] uses for it.
 ///
-/// First is where the *encoding and construction* side of this crate takes its
-/// [`Algorithm`], and only that side: this function, `encode_string_alloc`,
-/// `encode_string` (immediately after its `dst` buffer, so first among the
-/// value arguments), and [`Argon2::new`](crate::Argon2::new). The verify side
-/// did not move it, and the C is why: `argon2_verify(encoded, pwd, pwdlen,
-/// type)` (`argon2.h:347`) also ends with `type`, and that shape was worth
-/// keeping for the family that mirrors it. So `algorithm` comes **last** in
-/// `decode_string`,
-/// [`Argon2::verify_encoded`](crate::Argon2::verify_encoded),
-/// [`Argon2::verify_encoded_with_ad`](crate::Argon2::verify_encoded_with_ad),
-/// [`Argon2::verify_password`](crate::Argon2::verify_password) and the three
-/// [`Hasher`](crate::Hasher) methods of the same names. The four `_bounded`
-/// spellings are the near miss: `algorithm` still sits after everything the C
-/// passes, but this crate's own `ceiling` argument follows it, so it is third
-/// of four or fifth of six rather than last.
-///
-/// The rule to carry away is "encode and construct take the algorithm first,
-/// verify takes it last", not one position across the whole API.
-///
-/// A caller who supplies the two costs the other way round gets no error back,
-/// and the reason is arithmetic rather than luck. `t_cost` and `m_cost` reach
-/// the result through one term each, `num_len(t_cost)` and `num_len(m_cost)`,
-/// and the two terms are added: the sum of a pair of decimal digit counts does
-/// not depend on which count came from which cost. Nothing else in the body
-/// reads either value. The `m=` and `t=` fields of the string itself are
-/// written by `encode_string` out of the [`Params`] it is handed, never out of
-/// anything passed here, so a swap at this call site cannot reach the output
-/// either. That makes the equality a property of this one formula and not a
-/// rule about the crate: `encoded_len_is_symmetric_in_m_and_t` pins it at every
-/// digit-count boundary, and will fail there first if the length ever stops
-/// being a plain sum. Naming the arguments in the documented order keeps the
-/// call site readable and keeps it correct under any later formula.
+/// `algorithm` comes first here and on the rest of the encode-and-construct
+/// side; the verify family keeps the C's trailing `type` and takes it last.
 ///
 /// ```
 /// use argon2_rust::{Algorithm, Params, encoded_len};
@@ -1085,14 +1055,26 @@ mod tests {
         );
     }
 
-    /// Pins the claim in `encoded_len`'s `# Argument order` section: the C's
-    /// `argon2_encodedlen` (`argon2.c:447`) takes `t_cost` before `m_cost`,
-    /// this port keeps that order, and it is the reverse of `Params::new`. A
-    /// caller who swaps the two gets the same number, because both costs enter
-    /// the result only as `num_len(t_cost) + num_len(m_cost)` and that sum is
-    /// blind to which digit count came from which cost. If the formula ever
-    /// stops being a plain sum of the two, this fails and the doc gets fixed
-    /// with it.
+    // Pins the claim in `encoded_len`'s `# Argument order` section: the C's
+    // `argon2_encodedlen` (`argon2.c:447`) takes `t_cost` before `m_cost`, this
+    // port keeps that order, and it is the reverse of `Params::new`.
+    //
+    // A caller who supplies the two costs the other way round gets no error
+    // back, and the reason is arithmetic rather than luck. `t_cost` and `m_cost`
+    // each reach the result through exactly one term, `num_len(t_cost)` and
+    // `num_len(m_cost)`, and the two terms are added, so the sum does not depend
+    // on which digit count came from which cost. Nothing else in the body reads
+    // either value. The swap is therefore *always* harmless, not usually
+    // harmless: the swapped call returns the same number, and that number is
+    // also the correct one. Nothing passed to `encoded_len` reaches the emitted
+    // string either -- `encode_string` writes the `m=` and `t=` fields out of
+    // the `&Params` it is handed. A swapped call site is a cosmetic
+    // inconsistency, not a latent bug.
+    //
+    // That makes the equality a property of this one formula and not a rule
+    // about the crate. This test pins it at every digit-count boundary and will
+    // fail here first if the length ever stops being a plain sum of the two
+    // terms, at which point the doc gets fixed with it.
     #[test]
     fn encoded_len_is_symmetric_in_m_and_t() {
         // The pair the doc example uses, the C's own test vector, and the

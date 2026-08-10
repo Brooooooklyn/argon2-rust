@@ -339,7 +339,8 @@ fn read_golden(name: &str) -> String {
 /// the crate is KAT-checked without anyone remembering to edit this file.
 fn runnable_backends() -> Vec<Backend> {
     Backend::ALL
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|b| b.is_available())
         .collect()
 }

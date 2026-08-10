@@ -111,6 +111,14 @@ pub const PREHASH_SEED_LENGTH: usize = 72;
 // not either. Keeping them (rather than dropping them) is what makes the
 // header-for-header correspondence with the C checkable; do not add a use for
 // them without checking the C grew one first.
+//
+// `#[cfg(test)]`, and deliberately NOT public. Each one's own documentation
+// says not to bounds-check against it, which is disqualifying for a stable
+// export: the names read like enforced limits, they sit next to the `MIN_`/
+// `MAX_` constants that really are enforced, and `MIN_DECODED_SALT_LEN` even
+// holds the same value as the real bound today. A caller who reaches for one
+// gets a limit the decoder does not apply. They stay here so
+// `decoded_mirrors_are_not_decoder_bounds` can keep pinning the gap.
 
 /// `ARGON2_MAX_DECODED_LANES`.
 ///
@@ -131,9 +139,10 @@ pub const PREHASH_SEED_LENGTH: usize = 72;
 /// ```
 ///
 /// (`m=2400` because [`validate_inputs`] requires `m_cost >= 8 * lanes`, not
-/// because 255 played any part.) The `max_decoded_lanes_is_not_a_decoder_bound`
+/// because 255 played any part.) The `decoded_mirrors_are_not_decoder_bounds`
 /// test pins the gap between this value and the bound that is real.
-pub const MAX_DECODED_LANES: u32 = 255;
+#[cfg(test)]
+const MAX_DECODED_LANES: u32 = 255;
 /// `ARGON2_MIN_DECODED_SALT_LEN`.
 ///
 /// Mirrored from `encoding.h:23`, and unread for the same reason: the C
@@ -147,7 +156,8 @@ pub const MAX_DECODED_LANES: u32 = 255;
 /// different headers (`encoding.h` and `argon2.h`), and if [`MIN_SALT_LENGTH`]
 /// ever moves the decoder moves with it while this value stays at 8. Check
 /// decoded salts against [`MIN_SALT_LENGTH`].
-pub const MIN_DECODED_SALT_LEN: u32 = 8;
+#[cfg(test)]
+const MIN_DECODED_SALT_LEN: u32 = 8;
 /// `ARGON2_MIN_DECODED_OUT_LEN`.
 ///
 /// Mirrored from `encoding.h:24`, and likewise never read by the C, so
@@ -162,7 +172,8 @@ pub const MIN_DECODED_SALT_LEN: u32 = 8;
 /// ```text
 /// $argon2id$v=19$m=2400,t=1,p=1$c29tZXNhbHQ$kQGQLZpZJIk
 /// ```
-pub const MIN_DECODED_OUT_LEN: u32 = 12;
+#[cfg(test)]
+const MIN_DECODED_OUT_LEN: u32 = 12;
 
 // ---------------------------------------------------------------------------
 // Algorithm
@@ -309,16 +320,6 @@ impl Version {
 /// constructor already ran through this function, so they cannot drift from the
 /// costs the hash will actually run with, and `core` takes that route on every
 /// hash.
-///
-/// The reason to prefer the method form is the shape of this signature. The
-/// five `usize` parameters are positional and adjacent: `out_len`, `pwd_len`,
-/// `salt_len`, `secret_len` and `ad_len` form one unbroken run of a single
-/// type, so any two of them can be transposed and the code still compiles. The
-/// mistake is silent at compile time and surfaces later as the wrong error
-/// code, or as no error at all. `validate_for` takes `out_len` out of that run
-/// and pins it to the `Params`, leaving four positional lengths instead of
-/// five, and it removes the four `u32` cost arguments from the call site
-/// entirely.
 ///
 /// Reach for this function directly only when the C's exact check ordering is
 /// what is wanted, which is the one thing the `Params` route cannot give you:
@@ -740,22 +741,34 @@ mod tests {
     }
 
     #[test]
-    fn max_decoded_lanes_is_not_a_decoder_bound() {
-        // `MAX_DECODED_LANES` mirrors `encoding.h:22` and is read by nobody:
-        // not by the C, and so not by `decode_string` here either. `lanes` is
-        // bounded by `MAX_LANES` in `validate_inputs`, which is 16_777_215:
-        // roughly 65_000x this value. Measured:
-        // `$argon2id$v=19$m=2400,t=1,p=300$...` encodes and verifies, with `p`
-        // well past 255.
+    fn decoded_mirrors_are_not_decoder_bounds() {
+        // The three `encoding.h` mirrors are read by nobody: not by the C, and
+        // so not by `decode_string` here either. Each one's doc tells a caller
+        // not to bounds-check against it. This pins the gap that makes that
+        // advice true, so the prose cannot go stale.
         //
-        // A strict `<` is the point. If the two ever met, the doc on
-        // `MAX_DECODED_LANES` ("this is not the bound") would be false, and so
-        // would the doc's advice not to bounds-check against it.
-        //
-        // In a `const` block so the check runs at compile time: both operands
-        // are constants, so a violation is a build error rather than a red test,
+        // In `const` blocks so the checks run at compile time: every operand is
+        // a constant, so a violation is a build error rather than a red test,
         // and clippy::assertions_on_constants stays quiet.
+
+        // `lanes` is bounded by `MAX_LANES` (16_777_215), roughly 65_000x this
+        // value. Measured: `$argon2id$v=19$m=2400,t=1,p=300$...` encodes and
+        // verifies, with `p` well past 255. A strict `<` is the point — if the
+        // two ever met, "this is not the bound" would be false.
         const { assert!(MAX_DECODED_LANES < MAX_LANES) }
+
+        // The mirror sits ABOVE the enforced minimum (12 against 4), which is
+        // what lets a decoded tag legitimately undershoot it. Measured: an
+        // 8-byte tag round-trips.
+        const { assert!(MIN_DECODED_OUT_LEN > MIN_OUTLEN) }
+
+        // The salt mirror is the nastiest of the three because it agrees with
+        // the enforced bound today, which is exactly why it reads like the
+        // enforced bound. Pinned as equal on purpose: the day `MIN_SALT_LENGTH`
+        // moves, this fails and sends the next reader to the doc above that
+        // says "they happen to hold the same value (8) today" — prose that
+        // would otherwise quietly become wrong.
+        const { assert!(MIN_DECODED_SALT_LEN == MIN_SALT_LENGTH) }
     }
 
     /// Pins the two PHC strings the docs on `MAX_DECODED_LANES` and
