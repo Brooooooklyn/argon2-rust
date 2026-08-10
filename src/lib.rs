@@ -88,24 +88,10 @@
 //! release, so the next call gets a zeroed arena that is **already mapped and
 //! already resident**.
 //!
-//! That is worth far more than it used to be. Measured on Linux/x86-64,
-//! interleaved against the one-shot API, 15 paired rounds:
-//!
-//! ```text
-//!    m_cost   t   p |  one-shot |    pooled |  delta
-//!   ---------|-----|-----------|-----------|--------
-//!      1 MiB   1   1 |   212 us |    185 us | -11.7%
-//!      4 MiB   1   4 |   806 us |    592 us | -26.9%
-//!     64 MiB   1   1 |  25.89 ms|  19.43 ms | -24.9%
-//!     64 MiB   1   4 |  11.65 ms|   8.40 ms | -34.0%
-//!    256 MiB   1   1 | 111.74 ms|  86.17 ms | -23.3%
-//!    256 MiB   1   4 |  46.14 ms|  35.09 ms | -24.0%
-//! ```
-//!
-//! What reuse skips is the `mmap`, the first-touch page faults over the whole
-//! arena, and the `munmap` — not "an allocator call", of which there was only
-//! ever one and it never mattered. Below about 1 MiB a hash is mostly BLAKE2b
-//! and there is little to win (-0.7% at `m_cost = 8 KiB`).
+//! Skipping the `mmap`, the first-touch faults and the `munmap` is worth around
+//! -25% at `m_cost = 64 MiB`, and next to nothing below 1 MiB, where a hash is
+//! mostly BLAKE2b; [`Hasher`](Hasher#what-it-is-worth-measured) has the
+//! per-cost measurements.
 //!
 //! ```
 //! use argon2_rust::{Algorithm, Argon2, Hasher, Params, Version};

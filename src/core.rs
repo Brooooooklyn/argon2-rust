@@ -1091,16 +1091,8 @@ pub const BOUNDED_MAX_SALT_LEN: u32 = 1024;
 /// PHC string, like [`Argon2::verify_encoded`], not the raw expected tag that
 /// [`Argon2::verify`] takes.
 ///
-/// There is no raw-`Vec` password spelling, which is the empty cell above. That
-/// matches the C, where no entry point allocates a raw tag for the caller:
-/// `argon2id_hash_raw` (`argon2.c:230`) writes into a buffer the caller sized.
-/// [`Argon2::hash`] is this crate's own convenience and keeps its own name.
-///
-/// The aliases exist because the C's per-algorithm entry points are named for
-/// exactly these three shapes, so that is what a caller arriving from the C
-/// looks for: `argon2id_hash_raw` (`argon2.c:230`), `argon2id_hash_encoded`
-/// (`argon2.c:219`) and `argon2id_verify` (`argon2.c:325`). They also let the
-/// call site read as "hash a password" rather than "hash some bytes".
+/// There is no raw-`Vec` password spelling, which is the empty cell above; for
+/// that shape the only name is [`Argon2::hash`].
 ///
 /// ```
 /// use argon2_rust::{Algorithm, Argon2, Params, Version};
@@ -1237,6 +1229,9 @@ impl Argon2 {
 
     /// Derive a tag into `out`, with a secret key and associated data.
     ///
+    /// No PHC-emitting entry point accepts either; see the "Secret and
+    /// associated data" section of [`Argon2::hash_encoded`].
+    ///
     /// # Errors
     ///
     /// As [`Argon2::hash_into`].
@@ -1302,6 +1297,18 @@ impl Argon2 {
     ///
     /// Always emits `$v=`, exactly as `encode_string()` in the C does, even for
     /// [`Version::V0x10`].
+    ///
+    /// # Secret and associated data
+    ///
+    /// No PHC-emitting entry point takes a `secret` (pepper) or `ad`, because a
+    /// PHC string has a field for neither: `argon2_hash()` (`argon2.h:322`)
+    /// hardcodes `context.secret = NULL; context.ad = NULL` (`argon2.c:139-142`)
+    /// and `encode_string` emits only `$type$v=$m=,t=,p=$salt$hash`. A peppered
+    /// deployment must call [`Argon2::hash_into_with_ad`] and encode the tag
+    /// itself — `mod encoding` is private, so that means the PHC layout and
+    /// unpadded Base64 by hand. Its string is indistinguishable from an
+    /// unpeppered one, so [`Argon2::verify_encoded`] on it answers
+    /// [`Error::VerifyMismatch`] rather than any "missing pepper" signal.
     ///
     /// # Errors
     ///
@@ -1821,32 +1828,7 @@ fn decode_bounded(
 /// acquisition is spread over three passes of filling.
 ///
 /// It does **not** remove allocator calls — there was only ever one per hash,
-/// 1.7 us out of 306 ms at `m_cost = 1 GiB`. The table this replaces said reuse
-/// was worth "2-3%, one memset"; that was measured on macOS, where `libmalloc`
-/// keeps the arena's pages and a steady-state process faults zero times per
-/// hash. On Linux every one-shot hash faults the entire arena, and that is what
-/// the numbers above are.
-///
-/// # Why the small buffers are still `Vec`s
-///
-/// [`hash_encoded`](Hasher::hash_encoded) and
-/// [`verify_encoded`](Hasher::verify_encoded) allocate short-lived scratch
-/// (98 B to encode, 51 B + 33 B to decode). The `bump-alloc` feature provides a
-/// reusable bump inside `Workspace` only as an `internal-api` test/bench control;
-/// it is deliberately **not** a stable `Hasher` optimisation, for two reasons.
-///
-/// First, the size: a bump saves 17 ns across all three buffers, which is 0.16%
-/// of the smallest Argon2 hash that exists and 0.00013% of an RFC 9106 one —
-/// four orders of magnitude below this machine's run-to-run noise, and below
-/// the rounding error of every number in the table above.
-///
-/// Second, most of it is not available anyway. The 98 B encode buffer cannot
-/// move to a bump at any price: `encode_string_alloc` hands that exact
-/// allocation to `String::from_utf8`, so it *is* the `String` this method
-/// returns. Only the two decode buffers could, and that would mean changing
-/// `decode_string`'s signature to buy 12 ns. The feature stays available to the
-/// internal benchmark so that this tradeoff remains measured rather than
-/// assumed; enabling it does not change this stable API.
+/// 1.7 us out of 306 ms at `m_cost = 1 GiB`.
 ///
 /// # Wiping
 ///
@@ -1878,31 +1860,10 @@ fn decode_bounded(
 ///
 /// # Two spellings
 ///
-/// Mirrored from [`Argon2`], trap included. The same three entry points carry
-/// an alias and no others: [`Hasher::hash_password_into`],
-/// [`Hasher::hash_password`] and [`Hasher::verify_password`], each a pure
-/// delegation to [`Hasher::hash_into`], [`Hasher::hash_encoded`] and
-/// [`Hasher::verify_encoded`]. `Hasher::hash_password_with_random_salt` is
-/// again the exception that is neither: no base twin, and a fresh salt drawn
-/// per call rather than a delegation. Where the alias does exist, the two
-/// families do not spell the *output format* the same way.
-///
-/// ```text
-///                      raw -> caller buffer   raw -> Vec   PHC -> String
-///   base:              hash_into              hash         hash_encoded
-///   password:          hash_password_into     (none)       hash_password
-///                                   ^ raw                  ^ PHC
-/// ```
-///
-/// [`Hasher::hash_password_into`] writes a **raw** tag into the caller's
-/// buffer, as [`Hasher::hash_into`] does. [`Hasher::hash_password`] returns a
-/// **PHC string**, as [`Hasher::hash_encoded`] does. Only `_into` separates
-/// those names, and `_into` reads as a destination rather than as a format.
-/// [`Hasher::verify_password`] likewise takes a PHC string, like
-/// [`Hasher::verify_encoded`], not the raw expected tag that [`Hasher::verify`]
-/// takes. The empty cell is real: for a raw tag as a `Vec<u8>` the only
-/// spelling is [`Hasher::hash`]. See [`Argon2`]'s section of the same name for
-/// why both families are kept.
+/// Every alias mirrors [`Argon2`], trap included: [`Hasher::hash_password_into`]
+/// writes a **raw** tag while [`Hasher::hash_password`] returns a **PHC
+/// string**, because `_into` names a destination and not a format. See
+/// [`Argon2`'s section of the same name](Argon2#two-spellings) for the table.
 ///
 /// ```
 /// use argon2_rust::{Algorithm, Argon2, Params, Version};
@@ -2869,7 +2830,7 @@ unsafe fn hash_in_workspace(
 /// # use argon2_rust::__internal::hash_with_backend;
 /// # let params = Params::new(8, 1, 1, 32).unwrap();
 /// # let mut out = [0u8; 32];
-/// for backend in Backend::ALL {
+/// for &backend in Backend::ALL {
 ///     if !backend.is_available() {
 ///         continue; // this CPU would SIGILL
 ///     }
@@ -2894,7 +2855,7 @@ unsafe fn hash_in_workspace(
 /// # use argon2_rust::__internal::hash_with_backend;
 /// # let params = Params::new(8, 1, 1, 32).unwrap();
 /// # let mut out = [0u8; 32];
-/// for backend in Backend::ALL {
+/// for &backend in Backend::ALL {
 ///     if !backend.is_available() {
 ///         continue; // this CPU would SIGILL
 ///     }
@@ -3819,7 +3780,7 @@ mod tests {
             for version in [Version::V0x10, Version::V0x13] {
                 let argon2 = Argon2::new(algorithm, version, params);
 
-                for backend in Backend::ALL {
+                for &backend in Backend::ALL {
                     if !backend.is_available() {
                         continue; // this CPU would SIGILL
                     }
@@ -4342,7 +4303,7 @@ mod tests {
         }
         .expect("scalar");
 
-        for backend in Backend::ALL {
+        for &backend in Backend::ALL {
             if !backend.is_available() {
                 continue;
             }

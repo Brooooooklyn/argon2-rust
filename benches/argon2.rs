@@ -362,7 +362,8 @@ fn params(m_cost: u32, t_cost: u32, lanes: u32, threads: u32) -> Params {
 /// bench-only affordance and never a library path.
 fn runnable_backends() -> Vec<Backend> {
     let mut backends: Vec<Backend> = Backend::ALL
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|b| b.is_available())
         .collect();
 
@@ -371,7 +372,7 @@ fn runnable_backends() -> Vec<Backend> {
     };
 
     for name in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        let Some(forced) = Backend::ALL.into_iter().find(|b| b.name() == name) else {
+        let Some(forced) = Backend::ALL.iter().copied().find(|b| b.name() == name) else {
             eprintln!("ARGON2_BENCH_FORCE: unknown backend {name:?}, ignoring");
             continue;
         };
