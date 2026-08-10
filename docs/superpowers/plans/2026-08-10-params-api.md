@@ -24,6 +24,7 @@ Every task's requirements implicitly include this section.
 - Exactly three presets: `Params::OWASP` (equals `Params::DEFAULT`), `Params::RFC9106_HIGH_MEMORY`, `Params::RFC9106_LOW_MEMORY`.
 - `TagLen` has one constructor, `bytes()`. There is no `bits()`.
 - Every new public item needs a doc comment. `#![deny(missing_docs)]`-grade prose is the house style; match the density of the surrounding file.
+- **The docs build is a CI gate.** `ci.yml:96-108` runs `cargo doc --no-deps` and `cargo doc --no-deps --all-features`, both with `RUSTDOCFLAGS: -D warnings`. An intra-doc link to an item that does not exist yet is therefore a build failure, not a warning. Never write `[`Item`]` for something a later task introduces — use a plain code span and convert it to a link in the task that adds the item.
 - Full spec: `docs/superpowers/specs/2026-08-10-params-api-design.md`.
 
 ---
@@ -691,15 +692,29 @@ impl Default for Params {
 }
 ```
 
-- [ ] **Step 5: Run the new tests to verify they pass**
+- [ ] **Step 5: Convert the two deferred doc links, then run the new tests**
+
+Task 1 wrote `` `ParamsBuilder::build` `` as a plain code span in two places in
+`src/params.rs` — the `Memory` type doc and the `TagLen` type doc — because the
+item did not exist yet and an unresolvable intra-doc link fails the CI docs job.
+`ParamsBuilder` exists now, so convert both to real links: `` [`ParamsBuilder::build`] ``.
 
 Run: `cargo test --lib params::tests`
 Expected: PASS, including all ten new tests.
 
-- [ ] **Step 6: Run the whole suite — nothing may have regressed**
+- [ ] **Step 6: Run the whole suite and the docs gate**
 
-Run: `cargo test --release --locked`
-Expected: PASS, 350 tests. The old constructors and accessors are still present and untouched, so every existing test still compiles.
+Run:
+```bash
+cargo test --release --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+```
+Expected: all PASS. The suite is 357 tests at this point — the 350 baseline plus
+Task 1's five unit tests and two doctests. The old constructors and accessors are
+still present and untouched, so every existing test still compiles. The two doc
+commands are the `ci.yml:96-108` gate; they must be clean now that the links from
+Step 5 resolve.
 
 - [ ] **Step 7: Commit**
 
@@ -758,6 +773,28 @@ The struct's private **fields** keep their names — `m_cost`, `t_cost`,
 so `self.m_cost` inside `Params`' own methods stays as it is. The sed above only
 matches call syntax, `.m_cost()`, so it cannot touch a field access.
 
+- [ ] **Step 2a: Repoint the doc links that name the accessors you are about to delete**
+
+Deleting a public item turns every `[`Item`]` link to it into an unresolvable
+link, which fails the `RUSTDOCFLAGS="-D warnings"` docs gate. The sed in Step 1
+only matches call syntax, `.output_len()`, so it does not touch these. There are
+eight, all naming `output_len`, and none naming `m_cost` or `t_cost`:
+
+| Location | Current text | Becomes |
+| --- | --- | --- |
+| `src/core.rs:1192` | ``[`Params::output_len`]`` | ``[`Params::tag_len_bytes`]`` |
+| `src/core.rs:1210` | `Params::output_len` (plain span, inside a doc example comment) | `Params::tag_len_bytes` |
+| `src/core.rs:1266` | ``[`Params::output_len`]`` | ``[`Params::tag_len_bytes`]`` |
+| `src/core.rs:1481` | ``[`Params::output_len`]`` | ``[`Params::tag_len_bytes`]`` |
+| `src/core.rs:2203` | ``[`Params::output_len`]`` | ``[`Params::tag_len_bytes`]`` |
+| `src/error.rs:91` | ``[`crate::Params::output_len`]`` | ``[`crate::Params::tag_len_bytes`]`` |
+| `src/encoding.rs:700` | ``[`Params::output_len`]`` | ``[`Params::tag_len_bytes`]`` |
+| `src/params.rs:406` | ``[`Params::output_len`]`` | ``[`Params::tag_len_bytes`]`` |
+
+Line numbers are from the state at the start of this task and will drift as you
+edit. Re-derive the list if needed with
+`grep -rn 'Params::output_len' src` — it must return nothing when you are done.
+
 - [ ] **Step 2: Delete the three old accessors**
 
 Remove `pub const fn m_cost`, `pub const fn t_cost` and `pub const fn output_len` from `impl Params` in `src/params.rs`. Leave `lanes`, `threads`, `effective_threads` and everything below them alone.
@@ -796,8 +833,13 @@ Run:
 ```bash
 cargo test --release --locked
 cargo build --release --benches
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ```
-Expected: both PASS, 350 tests. `--benches` matters here: `benches/argon2.rs` and
+Expected: all PASS, 357 tests. The two doc commands are the `ci.yml:96-108` gate.
+Step 2a below is what keeps them clean.
+
+`--benches` matters here: `benches/argon2.rs` and
 `benches/micro.rs` call the renamed accessors, and a plain `cargo test` does not
 compile bench targets. Any missed call site is a compile error naming the file
 and line.
@@ -888,8 +930,12 @@ Run:
 cargo test --release --locked --no-default-features
 cargo test --release --locked --all-features
 cargo build --release --target wasm32-wasip1
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ```
-Expected: all PASS. The 32-bit narrowing tests run in CI's `i686-pc-windows-msvc` leg; locally, `cargo build --target i686-unknown-linux-gnu` at minimum type-checks the `MAX_MEMORY = 2 GiB` path if that target is installed.
+Expected: all PASS. `Params::new` appears in doc links and doc examples across the
+crate; deleting it fails the docs gate until every one is repointed, exactly as in
+Task 3's Step 2a. `grep -rn 'Params::new' src` must return nothing. The 32-bit narrowing tests run in CI's `i686-pc-windows-msvc` leg; locally, `cargo build --target i686-unknown-linux-gnu` at minimum type-checks the `MAX_MEMORY = 2 GiB` path if that target is installed.
 
 - [ ] **Step 9: Commit**
 
