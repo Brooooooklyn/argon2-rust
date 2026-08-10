@@ -196,10 +196,12 @@ let q = Params::RFC9106_LOW_MEMORY.to_builder().lanes(1).build()?;
 
 ## Validation and errors
 
-No new `Error` variant. Every variant carries the C's exact `ARGON2_*`
-discriminant, and this crate's own precedent — `OutPtrMismatch`, reused for a
-Rust-only condition — is to reuse a C code rather than invent one. The redesign
-introduces no condition that needs a new one.
+No new `Error` variant — not because one is forbidden, but because none is
+needed. `Error` is `#[non_exhaustive]` and already carries a crate-specific
+variant, `OsRandom`, so adding one is available and is not a breaking change for
+a downstream `match`. The redesign simply introduces no condition that an
+existing variant does not already describe, which is also why `TagLen::bits()`
+is cut: it would have been the one new failure mode in the design.
 
 | Input | Result |
 | --- | --- |
