@@ -73,12 +73,25 @@ Rust is `rustc 1.97.1` everywhere, bench profile (`opt-level=3`, `lto="thin"`,
 #### Apple M5 Max — aarch64, NEON backend
 
 The reference has **no NEON path**: `src/opt.c` is x86-only, so the Makefile
-compiles `src/ref.c`. This is not an assumption — disassembling `_fill_block`
-in the built dylib gives 473 instructions and **zero NEON registers**, only
-`madd` / `eor` / `ror` on general-purpose registers.
+compiles `src/ref.c`. Both sides were disassembled rather than assumed:
 
-Read it as two results: `scalar` vs C is the like-for-like row, and `neon` vs C
-is what this port's SIMD buys over the only C build that exists on the platform.
+| `fill_block` | instructions | SIMD mnemonics | vector-register operands |
+|---|---:|---:|---:|
+| C `ref.c` | 473 | **0** | **0** |
+| Rust `Backend::Scalar` | 1141 | **198** | **588** |
+
+**Neither row below is scalar-vs-scalar.** NEON is mandatory baseline on
+aarch64, so LLVM auto-vectorises the Rust portable path — 192 of those SIMD
+mnemonics are `eor.16b`, and the prologue saves `d15`/`d14` — while gcc leaves
+`ref.c` entirely on general-purpose registers. The `scalar` row is therefore
+*auto-vectorised portable Rust* against *non-vectorised portable C*, and it comes
+out a tie, so LLVM's automatic vectorisation is worth approximately nothing here.
+Everything below a tie is the hand-written NEON backend.
+
+A true scalar-vs-scalar row is not reachable on this platform, and a
+NEON-vs-NEON row does not exist at all, because the reference has no NEON
+implementation to compare against. The x86-64 host below is the only place in
+this README where Rust SIMD is measured against C SIMD.
 
 | config | rust scalar | rust neon | C `ref.c` | C / neon | C / scalar |
 |---|---:|---:|---:|---:|---:|
@@ -90,6 +103,14 @@ is what this port's SIMD buys over the only C build that exists on the platform.
 
 The port costs nothing against the C it is a port of (0.96x – 1.04x). NEON adds
 1.34x – 1.53x on top.
+
+These NEON numbers depend on **FEAT_SHA3**. `fill_segment` compiles to 992
+`xar.2d` here — the rotate-and-XOR instruction, which folds a rotation and an
+XOR into one op and is exactly what BLAKE2's round wants. `rustc` enables `sha3`
+for `aarch64-apple-darwin` but **not** for `aarch64-unknown-linux-gnu`, so a
+generic aarch64 Linux build lowers those rotations another way and should not be
+assumed to reach these ratios. See `src/fill_block/neon.rs` — `ROR32_DEFAULT`
+picks the spelling by `cfg(target_feature = "sha3")`.
 
 #### AMD EPYC Genoa (Zen 4) — x86-64, AVX-512 backend
 
