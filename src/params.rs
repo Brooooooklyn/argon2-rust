@@ -80,6 +80,96 @@ pub const MIN_SECRET: u32 = 0;
 pub const MAX_SECRET: u32 = 0xFFFF_FFFF;
 
 // ---------------------------------------------------------------------------
+// Typed units
+// ---------------------------------------------------------------------------
+
+/// A memory cost, carried in kibibytes.
+///
+/// The unit is the point of this type. Argon2's `m_cost` is a count of 1 KiB
+/// blocks, so a bare `65536` at a call site could be read as bytes, KiB, MiB or
+/// blocks; `Memory::mib(64)` cannot.
+///
+/// No constructor validates or panics. The value is held as a `u64` and checked
+/// once, by [`ParamsBuilder::build`], which is the only place that knows the
+/// target's `MAX_MEMORY`.
+///
+/// ```
+/// use argon2_rust::params::Memory;
+///
+/// assert_eq!(Memory::mib(64), Memory::kib(65536));
+/// assert_eq!(Memory::gib(1), Memory::mib(1024));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Memory(u64);
+
+impl Memory {
+    /// A cost in kibibytes, the unit Argon2's `m_cost` uses.
+    #[inline]
+    #[must_use]
+    pub const fn kib(kib: u64) -> Memory {
+        Memory(kib)
+    }
+
+    /// A cost in mebibytes.
+    ///
+    /// Saturating, not wrapping: `mib(u64::MAX)` yields `u64::MAX` KiB rather
+    /// than panicking in a debug build. Any saturated value is far above
+    /// [`MAX_MEMORY`] and becomes [`Error::MemoryTooMuch`] at `build()`.
+    #[inline]
+    #[must_use]
+    pub const fn mib(mib: u64) -> Memory {
+        Memory(mib.saturating_mul(1024))
+    }
+
+    /// A cost in gibibytes. Saturating, for the reason given on [`Memory::mib`].
+    #[inline]
+    #[must_use]
+    pub const fn gib(gib: u64) -> Memory {
+        Memory(gib.saturating_mul(1024 * 1024))
+    }
+
+    /// The cost in kibibytes.
+    #[inline]
+    #[must_use]
+    pub const fn as_kib(self) -> u64 {
+        self.0
+    }
+}
+
+/// A tag length, carried in bytes.
+///
+/// There is deliberately no `bits()` constructor: a bit count that is not a
+/// whole number of bytes would be the only new failure mode in this API, and
+/// `TagLen::bytes(32)` already names the unit at the call site. RFC 9106's
+/// "256-bit tag" is written `TagLen::bytes(32)`.
+///
+/// Like [`Memory`], this validates nothing; [`ParamsBuilder::build`] does.
+///
+/// ```
+/// use argon2_rust::params::TagLen;
+///
+/// assert_eq!(TagLen::bytes(32).as_bytes(), 32);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TagLen(u64);
+
+impl TagLen {
+    /// A tag length in bytes.
+    #[inline]
+    #[must_use]
+    pub const fn bytes(bytes: u64) -> TagLen {
+        TagLen(bytes)
+    }
+
+    /// The length in bytes.
+    #[inline]
+    #[must_use]
+    pub const fn as_bytes(self) -> u64 {
+        self.0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Internal constants from src/core.h
 // ---------------------------------------------------------------------------
 
@@ -313,20 +403,20 @@ impl Version {
 ///
 /// This free function is the escape hatch, not the main path.
 /// [`Params::validate_for`] calls it with five of the nine arguments filled in
-/// from the receiver: the tag length (`out_len`, from [`Params::output_len`])
+/// from the receiver: the tag length (`out_len`, from [`Params::tag_len_bytes`])
 /// and the four cost values (`m_cost`, `t_cost`, `lanes`, `threads`). It leaves
 /// the caller exactly the four buffer lengths, `pwd_len`, `salt_len`,
-/// `secret_len` and `ad_len`. Those five values come from a [`Params`] that a
-/// constructor already ran through this function, so they cannot drift from the
-/// costs the hash will actually run with, and `core` takes that route on every
-/// hash.
+/// `secret_len` and `ad_len`. Those five values come from a [`Params`] that
+/// [`ParamsBuilder::build`] already ran through this function, so they cannot
+/// drift from the costs the hash will actually run with, and `core` takes that
+/// route on every hash.
 ///
 /// Reach for this function directly only when the C's exact check ordering is
 /// what is wanted, which is the one thing the `Params` route cannot give you:
-/// [`Params::new`] and [`Params::new_with_threads`] validate the cost parameters
-/// at construction time, so a caller who supplies both a bad `m_cost` and a
-/// short salt sees the `m_cost` error where the C reports
-/// `ARGON2_SALT_TOO_SHORT` (the divergence note on [`Params`] spells this out).
+/// [`ParamsBuilder::build`] validates the cost parameters at construction time,
+/// so a caller who supplies both a bad `m_cost` and a short salt sees the
+/// `m_cost` error where the C reports `ARGON2_SALT_TOO_SHORT` (the divergence
+/// note on [`Params`] spells this out).
 /// `decode_string` is the in-crate example: it calls this function directly on
 /// the decoded fields and only builds its `Params` afterwards, so that a
 /// malformed PHC string yields the same error code `validate_inputs()`
@@ -334,9 +424,9 @@ impl Version {
 ///
 /// ```
 /// use argon2_rust::Error;
-/// use argon2_rust::params::{Params, validate_inputs};
+/// use argon2_rust::params::{Memory, Params, validate_inputs};
 ///
-/// let params = Params::new(19_456, 2, 1, 32)?;
+/// let params = Params::builder().memory(Memory::kib(19_456)).passes(2).build()?;
 ///
 /// // Four arguments. The tag length and the four costs come from `params`.
 /// assert_eq!(params.validate_for(8, 16, 0, 0), Ok(()));
@@ -354,7 +444,7 @@ impl Version {
 ///
 /// // The method form cannot be told that. `out_len` is not one of its four
 /// // arguments; it comes from the `Params`, which holds it at 32.
-/// assert_eq!(params.output_len(), 32);
+/// assert_eq!(params.tag_len_bytes(), 32);
 /// assert_eq!(params.validate_for(32, 16, 0, 0), Ok(()));
 /// # Ok::<(), Error>(())
 /// ```
@@ -457,14 +547,20 @@ pub const fn validate_inputs(
 /// `m_cost`, `t_cost`, `lanes`, `threads` and `outlen`. Password, salt, secret
 /// and associated data are passed per call.
 ///
-/// A `Params` value can only be built through a constructor that runs
-/// [`validate_inputs`], so `lanes >= 1` always holds and the derived values
-/// below never divide by zero.
+/// There is no public field and no public constructor: every `Params` comes out
+/// of [`ParamsBuilder::build`], which runs [`validate_inputs`], or out of a
+/// preset ([`Params::DEFAULT`], [`Params::OWASP`],
+/// [`Params::RFC9106_HIGH_MEMORY`], [`Params::RFC9106_LOW_MEMORY`]) that
+/// `build`'s `const` twin already ran. So `lanes >= 1` always holds and the
+/// derived values below never divide by zero.
+///
+/// Start from [`Params::builder`], or from [`Params::to_builder`] to adjust an
+/// existing value.
 ///
 /// # Known divergence from the C reference
 ///
-/// The constructors validate the cost parameters immediately, whereas the C
-/// checks salt length *before* `m_cost`. If a caller supplies both a bad
+/// [`ParamsBuilder::build`] validates the cost parameters immediately, whereas
+/// the C checks salt length *before* `m_cost`. If a caller supplies both a bad
 /// `m_cost` and a short salt, this crate reports the `m_cost` error at
 /// `Params` construction time while the C reports `ARGON2_SALT_TOO_SHORT`.
 /// Call [`validate_inputs`] directly to reproduce the C ordering exactly.
@@ -477,55 +573,117 @@ pub struct Params {
     output_len: u32,
 }
 
-impl Params {
-    /// Default memory cost in KiB (19 MiB), per the OWASP Argon2id guidance.
-    pub const DEFAULT_M_COST: u32 = 19456;
-    /// Default number of passes.
-    pub const DEFAULT_T_COST: u32 = 2;
-    /// Default degree of parallelism.
-    pub const DEFAULT_LANES: u32 = 1;
-    /// Default tag length in bytes.
-    pub const DEFAULT_OUTPUT_LEN: usize = 32;
+/// Builder for [`Params`].
+///
+/// Every setter is a `const fn` taking `self` by value, so a `Params` can be
+/// built in a `const` item — see [`ParamsBuilder::build_or_panic`]. The builder
+/// starts from [`ParamsBuilder::DEFAULT`], so each setter is optional.
+///
+/// ```
+/// use argon2_rust::{Params, params::{Memory, TagLen}};
+///
+/// let params = Params::builder()
+///     .memory(Memory::mib(64))
+///     .passes(3)
+///     .lanes(4)
+///     .tag_len(TagLen::bytes(32))
+///     .build()?;
+/// assert_eq!(params.memory(), Memory::mib(64));
+/// # Ok::<(), argon2_rust::Error>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ParamsBuilder {
+    memory: Memory,
+    passes: u32,
+    lanes: u32,
+    /// `None` means "track `lanes`", which is what `argon2_hash()` does: it
+    /// sets both `context.lanes` and `context.threads` from one argument.
+    /// Storing the choice rather than eagerly copying `lanes` is what makes
+    /// `.threads(2).lanes(4)` and `.lanes(4).threads(2)` agree.
+    threads: Option<u32>,
+    tag_len: TagLen,
+}
 
-    /// Validate and build parameters, with `threads == lanes`.
+impl ParamsBuilder {
+    /// The starting point: OWASP's Argon2id profile, 19 MiB, two passes, one
+    /// lane, a 32-byte tag.
     ///
-    /// This matches `argon2_hash()`, which sets both `context.lanes` and
-    /// `context.threads` from its single `parallelism` argument.
-    ///
-    /// # Errors
-    ///
-    /// Any of the cost-parameter errors from [`validate_inputs`].
-    pub const fn new(
-        m_cost: u32,
-        t_cost: u32,
-        lanes: u32,
-        output_len: usize,
-    ) -> Result<Params, Error> {
-        Params::new_with_threads(m_cost, t_cost, lanes, lanes, output_len)
+    /// These are literals rather than a copy of [`Params::DEFAULT`]'s fields
+    /// on purpose. `Params::DEFAULT` is built *by* this builder, so reading it
+    /// here would be a cyclic `const`.
+    pub const DEFAULT: ParamsBuilder = ParamsBuilder {
+        memory: Memory::kib(19456),
+        passes: 2,
+        lanes: 1,
+        threads: None,
+        tag_len: TagLen::bytes(32),
+    };
+
+    /// Set the memory cost.
+    #[inline]
+    #[must_use]
+    pub const fn memory(mut self, memory: Memory) -> ParamsBuilder {
+        self.memory = memory;
+        self
     }
 
-    /// Validate and build parameters with an explicit thread count.
+    /// Set the number of passes (`t_cost` in the C, `t=` in a PHC string).
+    #[inline]
+    #[must_use]
+    pub const fn passes(mut self, passes: u32) -> ParamsBuilder {
+        self.passes = passes;
+        self
+    }
+
+    /// Set the degree of parallelism (`p=` in a PHC string).
     ///
-    /// `threads` is a pure performance knob: it does **not** affect the tag.
-    /// Only `lanes` does. The effective count is `min(threads, lanes)`, see
-    /// [`Params::effective_threads`].
+    /// This one feeds the tag. Changing it changes the hash.
+    #[inline]
+    #[must_use]
+    pub const fn lanes(mut self, lanes: u32) -> ParamsBuilder {
+        self.lanes = lanes;
+        self
+    }
+
+    /// Set the worker-thread budget.
+    ///
+    /// A pure performance knob: it does **not** affect the tag. Only `lanes`
+    /// does. Left unset it tracks [`ParamsBuilder::lanes`], which is what
+    /// `argon2_hash()` does — it sets both `context.lanes` and
+    /// `context.threads` from its single `parallelism` argument. The effective
+    /// count is `min(threads, lanes)`, see [`Params::effective_threads`].
     ///
     /// ```
-    /// use argon2_rust::{Algorithm, Argon2, Params, Version};
+    /// use argon2_rust::{Algorithm, Argon2, Params, Version, params::Memory};
     ///
     /// // Four lanes of work, but never more than two OS threads to run them.
-    /// let budgeted = Params::new_with_threads(64, 1, 4, 2, 32)?;
+    /// let budgeted = Params::builder()
+    ///     .memory(Memory::kib(64))
+    ///     .passes(1)
+    ///     .lanes(4)
+    ///     .threads(2)
+    ///     .build()?;
     /// assert_eq!((budgeted.lanes(), budgeted.threads()), (4, 2));
     /// assert_eq!(budgeted.effective_threads(), 2);
     ///
     /// // Asking for more threads than lanes is legal, and the extra workers
     /// // simply have no lane to claim.
-    /// let oversubscribed = Params::new_with_threads(64, 1, 2, 8, 32)?;
+    /// let oversubscribed = Params::builder()
+    ///     .memory(Memory::kib(64))
+    ///     .passes(1)
+    ///     .lanes(2)
+    ///     .threads(8)
+    ///     .build()?;
     /// assert_eq!(oversubscribed.effective_threads(), 2);
     ///
-    /// // `Params::new` is exactly this call with `threads == lanes`.
-    /// let full = Params::new(64, 1, 4, 32)?;
-    /// assert_eq!(full, Params::new_with_threads(64, 1, 4, 4, 32)?);
+    /// // Leaving it unset is exactly `threads == lanes`.
+    /// let full = Params::builder()
+    ///     .memory(Memory::kib(64))
+    ///     .passes(1)
+    ///     .lanes(4)
+    ///     .build()?;
+    /// assert_eq!(full, budgeted.to_builder().threads(4).build()?);
+    /// assert_eq!(full.threads(), 4);
     ///
     /// // And the knob really is free of the tag: same `lanes`, same bytes,
     /// // whichever thread budget produced them.
@@ -537,41 +695,216 @@ impl Params {
     /// );
     /// # Ok::<(), argon2_rust::Error>(())
     /// ```
+    #[inline]
+    #[must_use]
+    pub const fn threads(mut self, threads: u32) -> ParamsBuilder {
+        self.threads = Some(threads);
+        self
+    }
+
+    /// Set the tag length.
+    #[inline]
+    #[must_use]
+    pub const fn tag_len(mut self, tag_len: TagLen) -> ParamsBuilder {
+        self.tag_len = tag_len;
+        self
+    }
+
+    /// Validate and produce [`Params`].
     ///
     /// # Errors
     ///
-    /// Any of the cost-parameter errors from [`validate_inputs`].
-    pub const fn new_with_threads(
-        m_cost: u32,
-        t_cost: u32,
-        lanes: u32,
-        threads: u32,
-        output_len: usize,
-    ) -> Result<Params, Error> {
-        // Feed placeholder lengths that always pass their own checks, so the
+    /// Any of the cost-parameter errors from [`validate_inputs`], plus
+    /// [`Error::OutputTooLong`] and [`Error::MemoryTooMuch`] for values too
+    /// large for this target at all.
+    pub const fn build(self) -> Result<Params, Error> {
+        // `Memory` and `TagLen` hold `u64`; `validate_inputs` takes a `u32`
+        // memory cost and a `usize` output length. Range-check BEFORE
+        // narrowing: on a 32-bit target `(1u64 << 40) as usize` is 0, which
+        // would turn OutputTooLong into OutputTooShort.
+        //
+        // The order here is the C's. `validate_inputs` checks BOTH `out_len`
+        // bounds before it looks at `m_cost`, so both are checked here too —
+        // pre-checking only the upper bound would report MemoryTooMuch for a
+        // 3-byte tag combined with an over-large memory cost, where the C
+        // reports OutputTooShort. That combination is reachable from a crafted
+        // PHC string, whose tag length and `m=` are both attacker-chosen.
+        let bytes = self.tag_len.as_bytes();
+        if bytes > MAX_OUTLEN as u64 {
+            return Err(Error::OutputTooLong);
+        }
+        if bytes < MIN_OUTLEN as u64 {
+            return Err(Error::OutputTooShort);
+        }
+        let kib = self.memory.as_kib();
+        if kib > MAX_MEMORY as u64 {
+            return Err(Error::MemoryTooMuch);
+        }
+
+        let threads = match self.threads {
+            Some(threads) => threads,
+            None => self.lanes,
+        };
+
+        // Placeholder lengths that always pass their own checks, so the
         // *relative* order of the checks that do apply is exactly the C's.
         match validate_inputs(
-            output_len,
+            bytes as usize,
             0,
             MIN_SALT_LENGTH as usize,
             0,
             0,
-            m_cost,
-            t_cost,
-            lanes,
+            kib as u32,
+            self.passes,
+            self.lanes,
             threads,
         ) {
             Ok(()) => {}
             Err(e) => return Err(e),
         }
+
         Ok(Params {
-            m_cost,
-            t_cost,
-            lanes,
+            m_cost: kib as u32,
+            t_cost: self.passes,
+            lanes: self.lanes,
             threads,
-            // `output_len <= MAX_OUTLEN == u32::MAX` was just checked.
-            output_len: output_len as u32,
+            output_len: bytes as u32,
         })
+    }
+
+    /// Validate and produce [`Params`], panicking on invalid parameters.
+    ///
+    /// This exists for `const` items, where a panic is a compile error:
+    ///
+    /// ```
+    /// use argon2_rust::{Params, params::Memory};
+    ///
+    /// const LOGIN: Params = Params::builder()
+    ///     .memory(Memory::mib(64))
+    ///     .passes(3)
+    ///     .build_or_panic();
+    /// assert_eq!(LOGIN.passes(), 3);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// If the parameters are invalid. Use [`ParamsBuilder::build`] anywhere a
+    /// runtime error is the right answer — it is the normal way in, and it is
+    /// why no fallible path in this crate panics.
+    #[must_use]
+    pub const fn build_or_panic(self) -> Params {
+        match self.build() {
+            Ok(params) => params,
+            Err(_) => panic!("invalid Argon2 parameters"),
+        }
+    }
+}
+
+impl Default for ParamsBuilder {
+    fn default() -> ParamsBuilder {
+        ParamsBuilder::DEFAULT
+    }
+}
+
+impl Params {
+    /// The recommended default: OWASP's Argon2id profile.
+    ///
+    /// 19 MiB, two passes, one lane, a 32-byte tag. Equal to [`Params::OWASP`]
+    /// and to `Params::default()`.
+    pub const DEFAULT: Params = ParamsBuilder::DEFAULT.build_or_panic();
+
+    /// OWASP's Argon2id profile: 19 MiB, `t=2`, `p=1`, 32-byte tag.
+    ///
+    /// The same value as [`Params::DEFAULT`], under the name that says where
+    /// the numbers come from.
+    pub const OWASP: Params = Params::DEFAULT;
+
+    /// RFC 9106 §4's first recommendation: 2 GiB, `t=1`, `p=4`, 32-byte tag.
+    ///
+    /// On a 32-bit target 2 GiB is exactly [`MAX_MEMORY`], so this constant
+    /// still compiles there — but the arena will fail to allocate inside a
+    /// 4 GiB address space. Prefer [`Params::RFC9106_LOW_MEMORY`] there.
+    pub const RFC9106_HIGH_MEMORY: Params = ParamsBuilder::DEFAULT
+        .memory(Memory::gib(2))
+        .passes(1)
+        .lanes(4)
+        .build_or_panic();
+
+    /// RFC 9106 §4's second recommendation, for memory-constrained systems:
+    /// 64 MiB, `t=3`, `p=4`, 32-byte tag.
+    pub const RFC9106_LOW_MEMORY: Params = ParamsBuilder::DEFAULT
+        .memory(Memory::mib(64))
+        .passes(3)
+        .lanes(4)
+        .build_or_panic();
+
+    /// Start building, from [`ParamsBuilder::DEFAULT`].
+    #[inline]
+    #[must_use]
+    pub const fn builder() -> ParamsBuilder {
+        ParamsBuilder::DEFAULT
+    }
+
+    /// Reopen these parameters for adjustment.
+    ///
+    /// ```
+    /// use argon2_rust::Params;
+    ///
+    /// let narrow = Params::RFC9106_LOW_MEMORY.to_builder().lanes(1).build()?;
+    /// assert_eq!(narrow.lanes(), 1);
+    /// # Ok::<(), argon2_rust::Error>(())
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn to_builder(self) -> ParamsBuilder {
+        ParamsBuilder {
+            memory: Memory::kib(self.m_cost as u64),
+            passes: self.t_cost,
+            lanes: self.lanes,
+            // `Some`, not `None`: a round trip must preserve an explicit
+            // thread budget that differs from `lanes`.
+            threads: Some(self.threads),
+            tag_len: TagLen::bytes(self.output_len as u64),
+        }
+    }
+
+    /// The memory cost.
+    #[inline]
+    #[must_use]
+    pub const fn memory(&self) -> Memory {
+        Memory::kib(self.m_cost as u64)
+    }
+
+    /// The memory cost in kibibytes (`context.m_cost`, `m=` in a PHC string).
+    ///
+    /// A `u32`, losslessly: `build()` rejected anything wider.
+    #[inline]
+    #[must_use]
+    pub const fn memory_kib(&self) -> u32 {
+        self.m_cost
+    }
+
+    /// Number of passes (`context.t_cost`, `instance.passes`, `t=`).
+    #[inline]
+    #[must_use]
+    pub const fn passes(&self) -> u32 {
+        self.t_cost
+    }
+
+    /// The tag length.
+    #[inline]
+    #[must_use]
+    pub const fn tag_len(&self) -> TagLen {
+        TagLen::bytes(self.output_len as u64)
+    }
+
+    /// The tag length in bytes (`context.outlen`).
+    ///
+    /// A `usize`, losslessly: `build()` rejected anything wider.
+    #[inline]
+    #[must_use]
+    pub const fn tag_len_bytes(&self) -> usize {
+        self.output_len as usize
     }
 
     /// Run the full `validate_inputs()` sequence for a concrete call.
@@ -602,20 +935,6 @@ impl Params {
         )
     }
 
-    /// Requested memory in KiB (`context.m_cost`).
-    #[inline]
-    #[must_use]
-    pub const fn m_cost(&self) -> u32 {
-        self.m_cost
-    }
-
-    /// Number of passes (`context.t_cost`, `instance.passes`).
-    #[inline]
-    #[must_use]
-    pub const fn t_cost(&self) -> u32 {
-        self.t_cost
-    }
-
     /// Degree of parallelism (`context.lanes`). Affects the tag.
     #[inline]
     #[must_use]
@@ -628,13 +947,6 @@ impl Params {
     #[must_use]
     pub const fn threads(&self) -> u32 {
         self.threads
-    }
-
-    /// Tag length in bytes (`context.outlen`).
-    #[inline]
-    #[must_use]
-    pub const fn output_len(&self) -> usize {
-        self.output_len as usize
     }
 
     /// `min(threads, lanes)`, as `argon2_ctx` computes it.
@@ -704,15 +1016,9 @@ impl Params {
 }
 
 impl Default for Params {
-    /// `m_cost = 19456` KiB, `t_cost = 2`, `lanes = 1`, `output_len = 32`.
+    /// [`Params::DEFAULT`]: OWASP's profile, 19 MiB, `t=2`, `p=1`, 32-byte tag.
     fn default() -> Params {
-        Params {
-            m_cost: Params::DEFAULT_M_COST,
-            t_cost: Params::DEFAULT_T_COST,
-            lanes: Params::DEFAULT_LANES,
-            threads: Params::DEFAULT_LANES,
-            output_len: Params::DEFAULT_OUTPUT_LEN as u32,
-        }
+        Params::DEFAULT
     }
 }
 
@@ -780,17 +1086,23 @@ mod tests {
     /// documented 255, and an 8-byte tag against a documented 12. The strings
     /// were pasted in from a run of this crate and nothing recomputed them, so
     /// a change to `encode_string`, to the tag derivation, or to what
-    /// `Params::new` does with `m_cost` would leave the docs quoting output the
-    /// crate no longer produces, with no test failing. Reproduced here from the
-    /// parameters those docs state, byte for byte, and verified back through
-    /// `verify_encoded` so the word "round-trips" is pinned too.
+    /// `ParamsBuilder::build` does with `m_cost` would leave the docs quoting
+    /// output the crate no longer produces, with no test failing. Reproduced
+    /// here from the parameters those docs state, byte for byte, and verified
+    /// back through `verify_encoded` so the word "round-trips" is pinned too.
     #[test]
     fn decoded_bound_docs_quote_strings_this_crate_still_produces() {
         use crate::Argon2;
 
         // `MAX_DECODED_LANES` is 255 and this is `p=300`. `m=2400` is forced by
         // `validate_inputs`' `m_cost >= 8 * lanes` rule, not by 255.
-        let params = Params::new(2400, 1, 300, 32).unwrap();
+        let params = Params::builder()
+            .memory(Memory::kib(2400))
+            .passes(1)
+            .lanes(300)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let encoded = argon2.hash_encoded(b"password", b"somesalt").unwrap();
         assert_eq!(
@@ -805,7 +1117,13 @@ mod tests {
         // `MIN_DECODED_OUT_LEN` is 12 and this tag is 8 bytes, which `MIN_OUTLEN`
         // (4) allows. Same `m` and salt as above so the two strings differ only
         // where the docs say they do.
-        let params = Params::new(2400, 1, 1, 8).unwrap();
+        let params = Params::builder()
+            .memory(Memory::kib(2400))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(8))
+            .build()
+            .unwrap();
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let encoded = argon2.hash_encoded(b"password", b"somesalt").unwrap();
         assert_eq!(
@@ -869,19 +1187,43 @@ mod tests {
     #[test]
     fn memory_layout_matches_argon2_ctx() {
         // m_cost below the floor gets bumped to 2 * SYNC_POINTS * lanes.
-        let p = Params::new(8, 1, 1, 32).unwrap();
+        let p = Params::builder()
+            .memory(Memory::kib(8))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         assert_eq!(p.memory_layout(), (8, 2, 8));
 
         // 1 << 16 KiB, one lane: 65536 blocks, 16384 per segment.
-        let p = Params::new(1 << 16, 2, 1, 32).unwrap();
+        let p = Params::builder()
+            .memory(Memory::kib(1 << 16))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         assert_eq!(p.memory_layout(), (65536, 16384, 65536));
 
         // Four lanes: segment_length = 65536 / 16 = 4096, lane_length = 16384.
-        let p = Params::new(1 << 16, 2, 4, 32).unwrap();
+        let p = Params::builder()
+            .memory(Memory::kib(1 << 16))
+            .passes(2)
+            .lanes(4)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         assert_eq!(p.memory_layout(), (65536, 4096, 16384));
 
         // Not a multiple of lanes * SYNC_POINTS: truncated down.
-        let p = Params::new(100, 1, 3, 32).unwrap();
+        let p = Params::builder()
+            .memory(Memory::kib(100))
+            .passes(1)
+            .lanes(3)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         let (blocks, seg, lane) = p.memory_layout();
         assert_eq!(seg, 100 / 12);
         assert_eq!(blocks, seg * 12);
@@ -890,9 +1232,237 @@ mod tests {
 
     #[test]
     fn effective_threads_is_min() {
-        let p = Params::new_with_threads(1 << 16, 1, 2, 8, 32).unwrap();
+        let p = Params::builder()
+            .memory(Memory::kib(1 << 16))
+            .passes(1)
+            .lanes(2)
+            .threads(8)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         assert_eq!(p.threads(), 8);
         assert_eq!(p.effective_threads(), 2);
+    }
+
+    #[test]
+    fn memory_units_convert() {
+        assert_eq!(Memory::kib(65536), Memory::mib(64));
+        assert_eq!(Memory::mib(1024), Memory::gib(1));
+        assert_eq!(Memory::gib(2).as_kib(), 2 * 1024 * 1024);
+        assert_eq!(Memory::kib(19456).as_kib(), 19456);
+    }
+
+    /// A plain `*` would panic here in a debug build. These constructors promise
+    /// not to, so an absurd request saturates and is rejected later, by `build()`.
+    #[test]
+    fn memory_saturates_instead_of_overflowing() {
+        assert_eq!(Memory::mib(u64::MAX).as_kib(), u64::MAX);
+        assert_eq!(Memory::gib(u64::MAX).as_kib(), u64::MAX);
+        assert_eq!(Memory::gib(u64::MAX / 1024).as_kib(), u64::MAX);
+    }
+
+    #[test]
+    fn memory_orders_by_size() {
+        assert!(Memory::mib(64) > Memory::kib(19456));
+        assert!(Memory::gib(1) > Memory::mib(64));
+    }
+
+    #[test]
+    fn tag_len_carries_bytes() {
+        assert_eq!(TagLen::bytes(32).as_bytes(), 32);
+        assert!(TagLen::bytes(64) > TagLen::bytes(32));
+    }
+
+    /// Both types must be usable in a `const` item, or the builder cannot be.
+    #[test]
+    fn units_are_const() {
+        const M: Memory = Memory::mib(64);
+        const T: TagLen = TagLen::bytes(32);
+        assert_eq!(M.as_kib(), 65536);
+        assert_eq!(T.as_bytes(), 32);
+    }
+
+    /// A `const` item, not a `let`. This is the whole reason the setters take
+    /// `self` by value; if constness regresses, this stops compiling.
+    const CONST_BUILT: Params = Params::builder()
+        .memory(Memory::mib(64))
+        .passes(3)
+        .lanes(4)
+        .build_or_panic();
+
+    #[test]
+    fn builder_builds_in_a_const_item() {
+        assert_eq!(CONST_BUILT.memory_kib(), 65536);
+        assert_eq!(CONST_BUILT.passes(), 3);
+        assert_eq!(CONST_BUILT.lanes(), 4);
+        assert_eq!(CONST_BUILT.threads(), 4);
+        assert_eq!(CONST_BUILT.tag_len_bytes(), 32);
+    }
+
+    #[test]
+    fn threads_defaults_to_lanes_but_an_explicit_value_survives() {
+        let implicit = Params::builder().lanes(4).build().unwrap();
+        assert_eq!((implicit.lanes(), implicit.threads()), (4, 4));
+
+        // Order must not matter: setting lanes after threads may not clobber it.
+        let explicit = Params::builder().threads(2).lanes(4).build().unwrap();
+        assert_eq!((explicit.lanes(), explicit.threads()), (4, 2));
+        assert_eq!(explicit.effective_threads(), 2);
+    }
+
+    #[test]
+    fn typed_and_raw_accessors_agree() {
+        let p = Params::builder()
+            .memory(Memory::mib(64))
+            .tag_len(TagLen::bytes(64))
+            .build()
+            .unwrap();
+        assert_eq!(p.memory(), Memory::mib(64));
+        assert_eq!(p.memory().as_kib(), u64::from(p.memory_kib()));
+        assert_eq!(p.tag_len(), TagLen::bytes(64));
+        assert_eq!(p.tag_len().as_bytes() as usize, p.tag_len_bytes());
+    }
+
+    #[test]
+    fn presets_hold_their_documented_numbers() {
+        assert_eq!(Params::OWASP, Params::DEFAULT);
+        assert_eq!(Params::DEFAULT, Params::default());
+
+        assert_eq!(Params::OWASP.memory_kib(), 19456);
+        assert_eq!((Params::OWASP.passes(), Params::OWASP.lanes()), (2, 1));
+        assert_eq!(Params::OWASP.tag_len_bytes(), 32);
+
+        assert_eq!(Params::RFC9106_HIGH_MEMORY.memory(), Memory::gib(2));
+        assert_eq!(
+            (
+                Params::RFC9106_HIGH_MEMORY.passes(),
+                Params::RFC9106_HIGH_MEMORY.lanes()
+            ),
+            (1, 4)
+        );
+
+        assert_eq!(Params::RFC9106_LOW_MEMORY.memory(), Memory::mib(64));
+        assert_eq!(
+            (
+                Params::RFC9106_LOW_MEMORY.passes(),
+                Params::RFC9106_LOW_MEMORY.lanes()
+            ),
+            (3, 4)
+        );
+    }
+
+    #[test]
+    fn to_builder_round_trips_every_preset() {
+        for preset in [
+            Params::OWASP,
+            Params::RFC9106_HIGH_MEMORY,
+            Params::RFC9106_LOW_MEMORY,
+        ] {
+            assert_eq!(preset.to_builder().build(), Ok(preset));
+        }
+    }
+
+    #[test]
+    fn a_preset_can_be_adjusted() {
+        let narrow = Params::RFC9106_LOW_MEMORY
+            .to_builder()
+            .lanes(1)
+            .build()
+            .unwrap();
+        assert_eq!(narrow.memory(), Memory::mib(64));
+        assert_eq!(narrow.passes(), 3);
+        assert_eq!(narrow.lanes(), 1);
+    }
+
+    #[test]
+    fn build_rejects_every_out_of_range_value() {
+        let b = Params::builder();
+        assert_eq!(
+            b.memory(Memory::gib(9999)).build(),
+            Err(Error::MemoryTooMuch)
+        );
+        assert_eq!(
+            b.memory(Memory::kib(4)).build(),
+            Err(Error::MemoryTooLittle)
+        );
+        assert_eq!(
+            b.tag_len(TagLen::bytes(3)).build(),
+            Err(Error::OutputTooShort)
+        );
+        assert_eq!(
+            b.tag_len(TagLen::bytes(1 << 40)).build(),
+            Err(Error::OutputTooLong)
+        );
+        assert_eq!(b.passes(0).build(), Err(Error::TimeTooSmall));
+        assert_eq!(b.lanes(0).build(), Err(Error::LanesTooFew));
+        assert_eq!(b.threads(0).build(), Err(Error::ThreadsTooFew));
+    }
+
+    /// `validate_inputs` checks BOTH `out_len` bounds before `m_cost`: its
+    /// "Validate output length" block runs before its "Validate memory cost"
+    /// block. `build()`'s own pre-narrowing checks must keep that order, so a
+    /// caller who gets both wrong sees the error the C would have reported.
+    /// Both directions are pinned: checking only the upper bound first is the
+    /// bug this test exists to catch.
+    #[test]
+    fn tag_len_is_checked_before_memory_like_the_c() {
+        let too_long = Params::builder()
+            .memory(Memory::gib(9999))
+            .tag_len(TagLen::bytes(1 << 40))
+            .build();
+        assert_eq!(too_long, Err(Error::OutputTooLong));
+
+        // The case that a two-check implementation gets wrong: the tag is too
+        // SHORT, so only `validate_inputs` would catch it — but the memory
+        // pre-check would already have returned MemoryTooMuch. Reachable from a
+        // crafted PHC string with a 3-byte tag and a large `m=`.
+        let too_short = Params::builder()
+            .memory(Memory::kib(MAX_MEMORY as u64 + 1))
+            .tag_len(TagLen::bytes(3))
+            .build();
+        assert_eq!(too_short, Err(Error::OutputTooShort));
+    }
+
+    /// A saturated `Memory` must be rejected, not truncated into a legal `u32`.
+    #[test]
+    fn a_saturated_memory_is_rejected() {
+        assert_eq!(
+            Params::builder().memory(Memory::gib(u64::MAX)).build(),
+            Err(Error::MemoryTooMuch)
+        );
+    }
+
+    /// The narrowing guard in `build()`, pinned with the one value that makes a
+    /// missing guard report the *wrong error* instead of no error.
+    ///
+    /// `Memory` holds a `u64` and `validate_inputs` takes a `u32`, so `build()`
+    /// must range-check before it narrows. 8 TiB is chosen for exactly one
+    /// reason: `(1u64 << 33) as u32` is **0**, and 0 is below `MIN_MEMORY`, so a
+    /// guard that ran after the narrowing would answer `MemoryTooLittle` for an
+    /// over-large request.
+    ///
+    /// What this protects is a direct builder input, not the PHC decoder:
+    /// `decode_string` parses `m=` with `decimal_u32`, so no string can hand
+    /// `build()` a memory value wider than `u32::MAX` KiB. A caller can, because
+    /// `Memory::kib` takes a `u64` and `Memory::mib`/`Memory::gib` saturate into
+    /// one — and answering `MemoryTooLittle` to a request for 8 TiB would be
+    /// actively misleading.
+    ///
+    /// This is a different failure mode from the neighbours above, which is why
+    /// it earns its own case rather than folding into them: `gib(9999)` and
+    /// `gib(u64::MAX)` narrow to values *inside* the legal range on a 64-bit
+    /// target, so a missing guard makes those two return `Ok`. `Memory::gib(8192)`
+    /// is the same number if you prefer that spelling, but `kib(1u64 << 33)` is
+    /// the one that shows the low 32 bits are zero, which is the whole point.
+    #[test]
+    fn memory_is_range_checked_before_it_is_narrowed() {
+        assert_eq!(
+            Params::builder().memory(Memory::kib(1u64 << 33)).build(),
+            Err(Error::MemoryTooMuch)
+        );
+        // The claim about the low 32 bits, asserted rather than trusted.
+        assert_eq!((1u64 << 33) as u32, 0);
+        assert!(0 < MIN_MEMORY);
     }
 
     #[test]

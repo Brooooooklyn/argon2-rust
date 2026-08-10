@@ -7,6 +7,7 @@
 //! panic, and any `Params` it rejects must fail cleanly.
 #![no_main]
 
+use argon2_rust::params::{Memory, TagLen};
 use argon2_rust::{Algorithm, Argon2, Params, Version};
 use libfuzzer_sys::fuzz_target;
 
@@ -30,7 +31,18 @@ fuzz_target!(|data: &[u8]| {
         Version::V0x13
     };
 
-    let Ok(params) = Params::new_with_threads(m_cost, t_cost, lanes, threads, outlen) else {
+    // Every value is fuzzer-derived and none of them is a builder default, so
+    // all five are spelled out. `build()` stays fallible on purpose: this
+    // target's whole contract is "never panics", which rules out
+    // `build_or_panic`.
+    let Ok(params) = Params::builder()
+        .memory(Memory::kib(u64::from(m_cost)))
+        .passes(t_cost)
+        .lanes(lanes)
+        .threads(threads)
+        .tag_len(TagLen::bytes(outlen as u64))
+        .build()
+    else {
         return;
     };
     let argon2 = Argon2::new(algorithm, version, params);

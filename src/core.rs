@@ -19,6 +19,8 @@ use crate::params::{
     Algorithm, BLOCK_SIZE, MAX_PWD_LENGTH, PREHASH_DIGEST_LENGTH, PREHASH_SEED_LENGTH, Params,
     SYNC_POINTS, Version,
 };
+#[cfg(test)]
+use crate::params::{Memory, TagLen};
 
 /// The KAT trace hook: `internal_kat(instance, pass)` from `src/genkat.c`.
 ///
@@ -269,9 +271,9 @@ fn initial_hash_into(
 
     // core.c:549-565. Six u32 parameters, in this exact order.
     state.update(&params.lanes().to_le_bytes());
-    state.update(&le32(params.output_len()));
-    state.update(&params.m_cost().to_le_bytes());
-    state.update(&params.t_cost().to_le_bytes());
+    state.update(&le32(params.tag_len_bytes()));
+    state.update(&params.memory_kib().to_le_bytes());
+    state.update(&params.passes().to_le_bytes());
     state.update(&version.as_u32().to_le_bytes());
     state.update(&algorithm.as_u32().to_le_bytes());
 
@@ -1095,9 +1097,9 @@ pub const BOUNDED_MAX_SALT_LEN: u32 = 1024;
 /// that shape the only name is [`Argon2::hash`].
 ///
 /// ```
-/// use argon2_rust::{Algorithm, Argon2, Params, Version};
+/// use argon2_rust::{Algorithm, Argon2, Params, Version, params::Memory};
 ///
-/// let params = Params::new(1 << 8, 1, 1, 32)?;
+/// let params = Params::builder().memory(Memory::kib(1 << 8)).passes(1).build()?;
 /// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 ///
 /// // `_into` picks the destination, and with it the raw format.
@@ -1160,9 +1162,9 @@ impl Argon2 {
     /// keep using [`Argon2::hash_into`] and friends when it does not.
     ///
     /// ```
-    /// use argon2_rust::{Algorithm, Argon2, Params, Version};
+    /// use argon2_rust::{Algorithm, Argon2, Params, Version, params::Memory};
     ///
-    /// let params = Params::new(8, 1, 1, 32)?;
+    /// let params = Params::builder().memory(Memory::kib(8)).passes(1).build()?;
     /// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     ///
     /// let mut hasher = argon2.hasher();
@@ -1189,12 +1191,12 @@ impl Argon2 {
 
     /// Derive a tag into `out`.
     ///
-    /// `out.len()` must equal [`Params::output_len`].
+    /// `out.len()` must equal [`Params::tag_len_bytes`].
     ///
     /// ```
-    /// use argon2_rust::{Algorithm, Argon2, Error, Params, Version};
+    /// use argon2_rust::{Algorithm, Argon2, Error, Params, Version, params::Memory};
     ///
-    /// let params = Params::new(64, 1, 1, 32)?;
+    /// let params = Params::builder().memory(Memory::kib(64)).passes(1).build()?;
     /// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     ///
     /// let mut tag = [0u8; 32];
@@ -1207,7 +1209,7 @@ impl Argon2 {
     ///     "$argon2id$v=19$m=64,t=1,p=1$c29tZXNhbHQ$cpx6VEQbwTVZvcpxNIxOVUWZ5xnAipUmAe1cg2GMG70",
     /// );
     ///
-    /// // `out.len()` is checked against `Params::output_len`, never used to
+    /// // `out.len()` is checked against `Params::tag_len_bytes`, never used to
     /// // size the tag: a buffer of the wrong length is an error, not a
     /// // truncated hash.
     /// let mut too_short = [0u8; 16];
@@ -1221,7 +1223,7 @@ impl Argon2 {
     /// # Errors
     ///
     /// Whatever [`Params::validate_for`] returns, [`Error::OutPtrMismatch`] if
-    /// `out.len()` disagrees with `params.output_len()`, or
+    /// `out.len()` disagrees with `params.tag_len_bytes()`, or
     /// [`Error::MemoryAllocationError`].
     pub fn hash_into(&self, pwd: &[u8], salt: &[u8], out: &mut [u8]) -> Result<(), Error> {
         self.hash_into_with_ad(pwd, salt, &[], &[], out)
@@ -1263,18 +1265,18 @@ impl Argon2 {
         }
     }
 
-    /// Derive a tag of [`Params::output_len`] bytes.
+    /// Derive a tag of [`Params::tag_len_bytes`] bytes.
     ///
     /// ```
-    /// use argon2_rust::{Algorithm, Argon2, Params, Version};
+    /// use argon2_rust::{Algorithm, Argon2, Params, Version, params::Memory};
     ///
-    /// let params = Params::new(64, 1, 1, 32)?;
+    /// let params = Params::builder().memory(Memory::kib(64)).passes(1).build()?;
     /// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     ///
     /// // The `Vec` is sized from the parameters, so there is no buffer to get
     /// // wrong and no `Error::OutPtrMismatch` to handle.
     /// let tag = argon2.hash(b"password", b"somesalt")?;
-    /// assert_eq!(tag.len(), argon2.params().output_len());
+    /// assert_eq!(tag.len(), argon2.params().tag_len_bytes());
     ///
     /// // Byte for byte what `hash_into` writes into a buffer you own; this is
     /// // the same function with the allocation moved inside.
@@ -1288,7 +1290,7 @@ impl Argon2 {
     ///
     /// As [`Argon2::hash_into`].
     pub fn hash(&self, pwd: &[u8], salt: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut out = try_zeroed_vec(self.params.output_len())?;
+        let mut out = try_zeroed_vec(self.params.tag_len_bytes())?;
         self.hash_into(pwd, salt, &mut out)?;
         Ok(out)
     }
@@ -1334,9 +1336,9 @@ impl Argon2 {
     /// `context->outlen` from the tag it just decoded.
     ///
     /// ```
-    /// use argon2_rust::{Algorithm, Argon2, Error, Params, Version};
+    /// use argon2_rust::{Algorithm, Argon2, Error, Params, Version, params::Memory};
     ///
-    /// let params = Params::new(64, 1, 1, 32)?;
+    /// let params = Params::builder().memory(Memory::kib(64)).passes(1).build()?;
     /// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     ///
     /// // A raw tag stored earlier, alongside the salt that produced it. The
@@ -1368,7 +1370,7 @@ impl Argon2 {
     ///
     /// As [`Argon2::hash_into`], or [`Error::VerifyMismatch`].
     pub fn verify(&self, pwd: &[u8], salt: &[u8], expected: &[u8]) -> Result<(), Error> {
-        let mut computed = try_zeroed_vec(self.params.output_len())?;
+        let mut computed = try_zeroed_vec(self.params.tag_len_bytes())?;
         let result = self.hash_into(pwd, salt, &mut computed);
         // argon2.c:349 `argon2_compare(hash, context->out, context->outlen)`.
         let matched = result.is_ok() && constant_time_eq(&computed, expected);
@@ -1429,7 +1431,7 @@ impl Argon2 {
 
         // argon2.c:302 `argon2_verify_ctx(&ctx, desired_result, type)`.
         let argon2 = Argon2::new(decoded.algorithm, decoded.version, decoded.params);
-        let mut computed = try_zeroed_vec(argon2.params.output_len())?;
+        let mut computed = try_zeroed_vec(argon2.params.tag_len_bytes())?;
         let result =
             argon2.hash_into_with_ad(pwd, &decoded.salt, secret, ad, &mut computed);
         let matched = result.is_ok() && constant_time_eq(&computed, &decoded.hash);
@@ -1478,7 +1480,7 @@ impl Argon2 {
     /// `argon2_hash()` with `hash != NULL` (`argon2.c:160`). The same function
     /// as [`Argon2::hash_into`]: `_into` picks the destination, and the format
     /// that comes with it is bytes. `out.len()` must equal
-    /// [`Params::output_len`]. For the PHC string, [`Argon2::hash_password`].
+    /// [`Params::tag_len_bytes`]. For the PHC string, [`Argon2::hash_password`].
     ///
     /// # Errors
     ///
@@ -1576,12 +1578,12 @@ impl Argon2 {
     /// one is for when it is not.
     ///
     /// ```
-    /// use argon2_rust::{Algorithm, Argon2, Params, Version};
+    /// use argon2_rust::{Algorithm, Argon2, Params, Version, params::Memory};
     ///
     /// let hostile = "$argon2id$v=19$m=4294967295,t=1,p=1$c29tZXNhbHQ$\
     ///                CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc";
     /// // 64 MiB, 8 passes, 4 lanes is far more than any sane stored hash.
-    /// let ceiling = Params::new(1 << 16, 8, 4, 32)?;
+    /// let ceiling = Params::builder().memory(Memory::mib(64)).passes(8).lanes(4).build()?;
     ///
     /// let err = Argon2::verify_encoded_bounded(
     ///     hostile, b"password", Algorithm::Argon2id, &ceiling,
@@ -1605,15 +1607,20 @@ impl Argon2 {
     /// `ceiling.threads()` bounds them, and it is a *fifth*, independent knob —
     /// none of the four checks above implies it. Decoding sets `threads = lanes`
     /// (C parity), so the string's own `p` would otherwise choose how many OS
-    /// threads this call spawns. A ceiling built with [`Params::new`] has
-    /// `threads == lanes` and so bounds them together; use
-    /// [`Params::new_with_threads`] to allow wide strings without spawning
-    /// wide:
+    /// threads this call spawns. A ceiling that leaves
+    /// [`ParamsBuilder::threads`](crate::params::ParamsBuilder::threads) unset
+    /// has `threads == lanes` and so bounds them together; set it to allow wide
+    /// strings without spawning wide:
     ///
     /// ```
-    /// use argon2_rust::{Params};
+    /// use argon2_rust::{Params, params::Memory};
     /// // Accept up to 256 lanes, but never run more than 2 workers.
-    /// let ceiling = Params::new_with_threads(1 << 16, 8, 256, 2, 32)?;
+    /// let ceiling = Params::builder()
+    ///     .memory(Memory::mib(64))
+    ///     .passes(8)
+    ///     .lanes(256)
+    ///     .threads(2)
+    ///     .build()?;
     /// # Ok::<(), argon2_rust::Error>(())
     /// ```
     ///
@@ -1627,9 +1634,9 @@ impl Argon2 {
     /// and reusing the C's own codes rather than inventing new ones —
     /// [`Error::DecodingLengthFail`] if `encoded` is longer than `ceiling` could
     /// have produced, [`Error::OutputTooLong`] if the decoded tag is longer than
-    /// `ceiling.output_len()`, [`Error::MemoryTooMuch`] if the decoded `m_cost`
-    /// exceeds `ceiling.m_cost()`, [`Error::TimeTooLarge`] if `t_cost` exceeds
-    /// `ceiling.t_cost()`, and [`Error::LanesTooMany`] if `lanes` exceeds
+    /// `ceiling.tag_len_bytes()`, [`Error::MemoryTooMuch`] if the decoded `m_cost`
+    /// exceeds `ceiling.memory_kib()`, [`Error::TimeTooLarge`] if `t_cost` exceeds
+    /// `ceiling.passes()`, and [`Error::LanesTooMany`] if `lanes` exceeds
     /// `ceiling.lanes()`.
     pub fn verify_encoded_bounded(
         encoded: &str,
@@ -1677,7 +1684,7 @@ impl Argon2 {
         let decoded = decode_bounded(encoded, algorithm, ceiling)?;
 
         let argon2 = Argon2::new(decoded.algorithm, decoded.version, decoded.params);
-        let mut computed = try_zeroed_vec(argon2.params.output_len())?;
+        let mut computed = try_zeroed_vec(argon2.params.tag_len_bytes())?;
         let result = argon2.hash_into_with_ad(pwd, &decoded.salt, secret, ad, &mut computed);
         let matched = result.is_ok() && constant_time_eq(&computed, &decoded.hash);
         clear_internal_memory(&mut computed);
@@ -1702,12 +1709,12 @@ impl Argon2 {
 /// an allocator spy against the previous version: a well-formed string with
 /// `m=8,t=1,p=1` and a 16 MiB Base64 tag peaked at **36 MiB** of live
 /// allocation, then ran a full Argon2 and a 12 MiB comparison — under a ceiling
-/// whose `output_len` was 32. Every cost was inside the ceiling; the tag was
+/// whose tag length was 32 bytes. Every cost was inside the ceiling; the tag was
 /// never looked at.
 ///
 /// So the size of the string is checked against what the ceiling could
 /// legitimately produce *before* anything is parsed, and the decoded tag length
-/// is then checked against `ceiling.output_len()` as well. A ceiling is four
+/// is then checked against `ceiling.tag_len_bytes()` as well. A ceiling is four
 /// numbers, and all four now mean something.
 fn decode_bounded(
     encoded: &str,
@@ -1720,12 +1727,12 @@ fn decode_bounded(
     // C's NUL, so this is permissive by exactly one byte.
     let max_encoded = crate::encoding::encoded_len(
         algorithm,
-        ceiling.t_cost(),
-        ceiling.m_cost(),
+        ceiling.passes(),
+        ceiling.memory_kib(),
         ceiling.lanes(),
         BOUNDED_MAX_SALT_LEN,
-        // `output_len` is bounded by MAX_OUTLEN, so this cast cannot truncate.
-        ceiling.output_len() as u32,
+        // The tag length is bounded by MAX_OUTLEN, so this cast cannot truncate.
+        ceiling.tag_len_bytes() as u32,
     );
     if encoded.len() > max_encoded {
         // ARGON2_DECODING_LENGTH_FAIL: "Some of encoded parameters are too long
@@ -1736,13 +1743,13 @@ fn decode_bounded(
 
     let mut decoded = crate::encoding::decode_string(encoded, algorithm)?;
 
-    if decoded.params.output_len() > ceiling.output_len() {
+    if decoded.params.tag_len_bytes() > ceiling.tag_len_bytes() {
         return Err(Error::OutputTooLong);
     }
-    if decoded.params.m_cost() > ceiling.m_cost() {
+    if decoded.params.memory_kib() > ceiling.memory_kib() {
         return Err(Error::MemoryTooMuch);
     }
-    if decoded.params.t_cost() > ceiling.t_cost() {
+    if decoded.params.passes() > ceiling.passes() {
         return Err(Error::TimeTooLarge);
     }
     if decoded.params.lanes() > ceiling.lanes() {
@@ -1768,13 +1775,11 @@ fn decode_bounded(
     // `threads >= 1` and a decoded string has `lanes >= 1`.
     let threads = ceiling.threads().min(decoded.params.lanes());
     if threads != decoded.params.threads() {
-        decoded.params = Params::new_with_threads(
-            decoded.params.m_cost(),
-            decoded.params.t_cost(),
-            decoded.params.lanes(),
-            threads,
-            decoded.params.output_len(),
-        )?;
+        // `to_builder()` carries the four cost values and the tag length across
+        // unchanged, so only the one field that actually moves is named here.
+        // Re-listing all five through `Params::builder()` would invite exactly
+        // the drift this clamp exists to prevent.
+        decoded.params = decoded.params.to_builder().threads(threads).build()?;
     }
     Ok(decoded)
 }
@@ -1792,9 +1797,9 @@ fn decode_bounded(
 /// same threading, same wipe.
 ///
 /// ```
-/// use argon2_rust::{Algorithm, Argon2, Params, Version};
+/// use argon2_rust::{Algorithm, Argon2, Params, Version, params::Memory};
 ///
-/// let params = Params::new(1 << 8, 1, 1, 32)?;
+/// let params = Params::builder().memory(Memory::kib(1 << 8)).passes(1).build()?;
 /// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 /// let mut hasher = argon2.hasher();
 ///
@@ -1851,8 +1856,8 @@ fn decode_bounded(
 /// the duration of that one call.
 ///
 /// ```compile_fail
-/// # use argon2_rust::{Algorithm, Argon2, Params, Version};
-/// # let params = Params::new(8, 1, 1, 32).unwrap();
+/// # use argon2_rust::{Algorithm, Argon2, Params, Version, params::Memory};
+/// # let params = Params::builder().memory(Memory::kib(8)).passes(1).build().unwrap();
 /// # let hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hasher();
 /// fn needs_sync<T: Sync>(_: &T) {}
 /// needs_sync(&hasher);
@@ -1866,9 +1871,9 @@ fn decode_bounded(
 /// [`Argon2`'s section of the same name](Argon2#two-spellings) for the table.
 ///
 /// ```
-/// use argon2_rust::{Algorithm, Argon2, Params, Version};
+/// use argon2_rust::{Algorithm, Argon2, Params, Version, params::Memory};
 ///
-/// let params = Params::new(1 << 8, 1, 1, 32)?;
+/// let params = Params::builder().memory(Memory::kib(1 << 8)).passes(1).build()?;
 /// let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hasher();
 ///
 /// // Same prefix, same arena, different return type and different format.
@@ -1959,9 +1964,9 @@ impl Hasher {
     /// Derive a tag into `out`. [`Argon2::hash_into`], reusing the arena.
     ///
     /// ```
-    /// use argon2_rust::{Algorithm, Argon2, Params, Version};
+    /// use argon2_rust::{Algorithm, Argon2, Params, Version, params::Memory};
     ///
-    /// let params = Params::new(64, 1, 1, 32)?;
+    /// let params = Params::builder().memory(Memory::kib(64)).passes(1).build()?;
     /// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     /// let mut hasher = argon2.hasher();
     ///
@@ -2016,7 +2021,7 @@ impl Hasher {
     ///
     /// As [`Argon2::hash_into`].
     pub fn hash(&mut self, pwd: &[u8], salt: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut out = try_zeroed_vec(self.argon2.params.output_len())?;
+        let mut out = try_zeroed_vec(self.argon2.params.tag_len_bytes())?;
         self.hash_into(pwd, salt, &mut out)?;
         Ok(out)
     }
@@ -2058,9 +2063,9 @@ impl Hasher {
     /// check strings written at several different `m_cost`s.
     ///
     /// ```
-    /// use argon2_rust::{Algorithm, Argon2, Error, Params, Version};
+    /// use argon2_rust::{Algorithm, Argon2, Error, Params, Version, params::Memory};
     ///
-    /// let params = Params::new(64, 1, 1, 32)?;
+    /// let params = Params::builder().memory(Memory::kib(64)).passes(1).build()?;
     /// let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hasher();
     ///
     /// // Registration: one string, carrying the salt and the parameters.
@@ -2177,7 +2182,7 @@ impl Hasher {
         if decoded.params.memory_blocks() as usize > self.pooled_ceiling() {
             // As `verify_encoded`: keep an attacker-chosen `m_cost` off the
             // pooled arena by running on a one-shot arena instead.
-            let mut computed = try_zeroed_vec(argon2.params.output_len())?;
+            let mut computed = try_zeroed_vec(argon2.params.tag_len_bytes())?;
             let result =
                 argon2.hash_into_with_ad(pwd, &decoded.salt, secret, ad, &mut computed);
             let matched = result.is_ok() && constant_time_eq(&computed, &decoded.hash);
@@ -2200,7 +2205,7 @@ impl Hasher {
     ///
     /// [`Argon2::hash_password_into`] over pooled memory, which is the same
     /// function as [`Hasher::hash_into`]. `out.len()` must equal
-    /// [`Params::output_len`]. For the PHC string, [`Hasher::hash_password`].
+    /// [`Params::tag_len_bytes`]. For the PHC string, [`Hasher::hash_password`].
     ///
     /// # Errors
     ///
@@ -2345,7 +2350,7 @@ impl Hasher {
         if decoded.params.memory_blocks() as usize > self.pooled_ceiling() {
             // As `verify_encoded_with_ad`: an m_cost this hasher's owner never
             // asked for runs on a one-shot arena.
-            let mut computed = try_zeroed_vec(argon2.params.output_len())?;
+            let mut computed = try_zeroed_vec(argon2.params.tag_len_bytes())?;
             let result = argon2.hash_into_with_ad(pwd, &decoded.salt, secret, ad, &mut computed);
             let matched = result.is_ok() && constant_time_eq(&computed, &decoded.hash);
             clear_internal_memory(&mut computed);
@@ -2446,7 +2451,7 @@ impl Hasher {
         ad: &[u8],
         expected: &[u8],
     ) -> Result<(), Error> {
-        let mut computed = try_zeroed_vec(argon2.params.output_len())?;
+        let mut computed = try_zeroed_vec(argon2.params.tag_len_bytes())?;
         let result = self.hash_into_using(argon2, pwd, salt, secret, ad, &mut computed);
         // argon2.c:349 `argon2_compare(hash, context->out, context->outlen)`.
         let matched = result.is_ok() && constant_time_eq(&computed, expected);
@@ -2641,7 +2646,7 @@ fn validate_and_size(
     // object; here the buffer and the configured length are separate, so they
     // can disagree. `ARGON2_OUT_PTR_MISMATCH` is defined in `argon2.h` but
     // never returned by the C, which makes it exactly the right code for this.
-    if out.len() != params.output_len() {
+    if out.len() != params.tag_len_bytes() {
         return Err(Error::OutPtrMismatch);
     }
 
@@ -2826,9 +2831,9 @@ unsafe fn hash_in_workspace(
 /// Guarded, and therefore fine:
 ///
 /// ```
-/// # use argon2_rust::{Algorithm, Backend, Params, Version};
+/// # use argon2_rust::{Algorithm, Backend, Params, Version, params::Memory};
 /// # use argon2_rust::__internal::hash_with_backend;
-/// # let params = Params::new(8, 1, 1, 32).unwrap();
+/// # let params = Params::builder().memory(Memory::kib(8)).passes(1).build().unwrap();
 /// # let mut out = [0u8; 32];
 /// for &backend in Backend::ALL {
 ///     if !backend.is_available() {
@@ -2851,9 +2856,9 @@ unsafe fn hash_in_workspace(
 /// below fails for the right reason rather than through some unrelated typo:
 ///
 /// ```compile_fail
-/// # use argon2_rust::{Algorithm, Backend, Params, Version};
+/// # use argon2_rust::{Algorithm, Backend, Params, Version, params::Memory};
 /// # use argon2_rust::__internal::hash_with_backend;
-/// # let params = Params::new(8, 1, 1, 32).unwrap();
+/// # let params = Params::builder().memory(Memory::kib(8)).passes(1).build().unwrap();
 /// # let mut out = [0u8; 32];
 /// for &backend in Backend::ALL {
 ///     if !backend.is_available() {
@@ -2917,12 +2922,25 @@ mod tests {
     #[test]
     fn decode_bounded_clamps_workers_to_the_ceilings_thread_budget() {
         const LANES: u32 = 256;
-        let params = Params::new(8 * LANES, 1, LANES, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(u64::from(8 * LANES)))
+            .passes(1)
+            .lanes(LANES)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let encoded = argon2.hash_encoded(b"pw", b"somesalt").expect("encode");
 
         // "Strings this wide are allowed; spawning this wide is not."
-        let ceiling = Params::new_with_threads(8 * LANES, 1, LANES, 1, 32).expect("ceiling");
+        let ceiling = Params::builder()
+            .memory(Memory::kib(u64::from(8 * LANES)))
+            .passes(1)
+            .lanes(LANES)
+            .threads(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("ceiling");
         let decoded =
             decode_bounded(&encoded, Algorithm::Argon2id, &ceiling).expect("within the ceiling");
 
@@ -2932,16 +2950,29 @@ mod tests {
     }
 
     /// The clamp only ever lowers. A ceiling that permits more workers than the
-    /// string needs must leave the decoded value alone, so the ordinary
-    /// `Params::new` ceiling (where `threads == lanes`) keeps full parallelism.
+    /// string needs must leave the decoded value alone, so the ordinary ceiling
+    /// with `.threads()` left unset (where `threads == lanes`) keeps full
+    /// parallelism.
     #[test]
     fn decode_bounded_leaves_workers_alone_when_the_ceiling_is_generous() {
-        let params = Params::new(1 << 10, 1, 4, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 10))
+            .passes(1)
+            .lanes(4)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let encoded = argon2.hash_encoded(b"pw", b"somesalt").expect("encode");
 
-        // `Params::new` sets threads = lanes = 8, i.e. more than the string's 4.
-        let ceiling = Params::new(1 << 16, 8, 8, 32).expect("ceiling");
+        // `.threads()` unset means threads = lanes = 8, more than the string's 4.
+        let ceiling = Params::builder()
+            .memory(Memory::kib(1 << 16))
+            .passes(8)
+            .lanes(8)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("ceiling");
         let decoded =
             decode_bounded(&encoded, Algorithm::Argon2id, &ceiling).expect("within the ceiling");
 
@@ -2969,7 +3000,13 @@ mod tests {
 
     #[test]
     fn index_alpha_pass0_slice0_is_all_but_the_previous() {
-        let params = Params::new(1 << 12, 1, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 12))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let mut arena = [Block::ZERO; 2];
         let inst = instance_for(&params, Algorithm::Argon2i, &mut arena);
 
@@ -2987,7 +3024,14 @@ mod tests {
     #[test]
     fn index_alpha_never_selects_the_current_or_a_concurrent_block() {
         // This is the property the parallel safety argument rests on.
-        let params = Params::new_with_threads(1024, 3, 4, 4, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1024))
+            .passes(3)
+            .lanes(4)
+            .threads(4)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let mut arena = [Block::ZERO; 2];
         let inst = instance_for(&params, Algorithm::Argon2d, &mut arena);
         let seg = inst.segment_length;
@@ -3036,7 +3080,14 @@ mod tests {
         // The `((index == 0) ? (-1) : 0)` branch. With slice = 1 and
         // segment_length = 2 the C computes reference_area_size = 2 - 1 = 1,
         // so the only legal answer is block 0.
-        let params = Params::new_with_threads(8, 1, 1, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(8))
+            .passes(1)
+            .lanes(1)
+            .threads(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let mut arena = [Block::ZERO; 2];
         let inst = instance_for(&params, Algorithm::Argon2i, &mut arena);
         assert_eq!(inst.segment_length, 2);
@@ -3051,7 +3102,14 @@ mod tests {
     fn index_alpha_start_position_skips_the_current_slice() {
         // pass > 0: start_position = (slice + 1) * segment_length, except for
         // the last slice where it is 0.
-        let params = Params::new_with_threads(1024, 2, 4, 4, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1024))
+            .passes(2)
+            .lanes(4)
+            .threads(4)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let mut arena = [Block::ZERO; 2];
         let inst = instance_for(&params, Algorithm::Argon2d, &mut arena);
         let seg = inst.segment_length;
@@ -3119,7 +3177,13 @@ mod tests {
             (341, 3),
         ];
 
-        let params = Params::new(1 << 12, 1, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 12))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let mut arena = [Block::ZERO; 2];
         let mut inst = instance_for(&params, Algorithm::Argon2i, &mut arena);
 
@@ -3144,7 +3208,13 @@ mod tests {
     #[test]
     fn index_alpha_degenerate_instance_does_not_panic() {
         // lane_length == 0 would divide by zero in the C.
-        let params = Params::new(8, 1, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(8))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let mut arena = [Block::ZERO; 2];
         let mut inst = instance_for(&params, Algorithm::Argon2i, &mut arena);
         inst.lane_length = 0;
@@ -3182,7 +3252,13 @@ mod tests {
     fn stable_hashes_do_not_request_an_h0_output_copy() {
         H0_COPY_COUNT.with(|count| count.set(0));
 
-        let params = Params::new(32, 1, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(32))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let mut tag = [0u8; 32];
         argon2
@@ -3234,7 +3310,14 @@ mod tests {
         // `phc-winner-argon2/kats/argon2id`, first "Pre-hashing digest" line:
         //   t_cost 3, m_cost 32, lanes 4, outlen 32,
         //   pwd 32 x 0x01, salt 16 x 0x02, secret 8 x 0x03, ad 12 x 0x04.
-        let params = Params::new_with_threads(32, 3, 4, 4, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(32))
+            .passes(3)
+            .lanes(4)
+            .threads(4)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let h = initial_hash(
             Algorithm::Argon2id,
             Version::V0x13,
@@ -3262,8 +3345,22 @@ mod tests {
         // Swapping any two parameters must change H0. Compare `lanes` against
         // `outlen`: both are 4, so a transposition would be invisible unless the
         // values differ.
-        let a = Params::new_with_threads(64, 1, 2, 2, 32).expect("params");
-        let b = Params::new_with_threads(64, 1, 4, 4, 32).expect("params");
+        let a = Params::builder()
+            .memory(Memory::kib(64))
+            .passes(1)
+            .lanes(2)
+            .threads(2)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
+        let b = Params::builder()
+            .memory(Memory::kib(64))
+            .passes(1)
+            .lanes(4)
+            .threads(4)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let ha = initial_hash(
             Algorithm::Argon2i,
             Version::V0x13,
@@ -3349,7 +3446,13 @@ mod tests {
     #[test]
     fn one_official_vector_end_to_end() {
         // test.c: Argon2i v=19 t=2 m=1<<16 p=1 "password" / "somesalt".
-        let params = Params::new(1 << 16, 2, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 16))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let argon2 = Argon2::new(Algorithm::Argon2i, Version::V0x13, params);
         let tag = argon2.hash(b"password", b"somesalt").expect("hash");
         assert_eq!(
@@ -3363,7 +3466,14 @@ mod tests {
         // The final "Tag:" line of each `phc-winner-argon2/kats/*` file:
         // t_cost 3, m_cost 32, lanes 4, outlen 32, pwd 32 x 0x01,
         // salt 16 x 0x02, secret 8 x 0x03, ad 12 x 0x04.
-        let params = Params::new_with_threads(32, 3, 4, 4, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(32))
+            .passes(3)
+            .lanes(4)
+            .threads(4)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         for (algorithm, version, expected) in [
             (
                 Algorithm::Argon2d,
@@ -3418,7 +3528,13 @@ mod tests {
     /// ```
     #[test]
     fn tiny_single_threaded_hash_matches_the_c_reference() {
-        let params = Params::new(8, 1, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(8))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         assert_eq!(params.memory_layout(), (8, 2, 8));
         for (algorithm, expected) in [
             (
@@ -3450,7 +3566,13 @@ mod tests {
     /// ```
     #[test]
     fn tiny_two_lane_hash_matches_the_c_reference() {
-        let params = Params::new(16, 2, 2, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(16))
+            .passes(2)
+            .lanes(2)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         assert_eq!(params.memory_layout(), (16, 2, 8));
         for (algorithm, expected) in [
             (
@@ -3476,7 +3598,13 @@ mod tests {
 
     #[test]
     fn out_length_mismatch_is_out_ptr_mismatch() {
-        let params = Params::new(1 << 8, 1, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 8))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let mut out = [0u8; 16];
         assert_eq!(
@@ -3487,7 +3615,13 @@ mod tests {
 
     #[test]
     fn trace_fires_once_per_pass_with_the_whole_arena() {
-        let params = Params::new(1 << 8, 3, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 8))
+            .passes(3)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let mut passes = alloc::vec::Vec::new();
         let mut out = [0u8; 32];
         let mut trace = |pass: u32, blocks: &[Block]| {
@@ -3533,7 +3667,13 @@ mod tests {
     fn a_panicking_trace_callback_unwinds_instead_of_deadlocking_the_pool() {
         // 4 lanes and 4 threads, so there really are helpers parked on the
         // barrier when the callback runs.
-        let params = Params::new(64, 2, 4, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(64))
+            .passes(2)
+            .lanes(4)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let mut arena = Arena::new(params.memory_blocks() as usize).expect("arena");
         let mut blockhash = initial_hash(
             Algorithm::Argon2id,
@@ -3579,8 +3719,22 @@ mod tests {
     fn threads_do_not_change_the_tag() {
         // Spec item (12): only `lanes` affects the tag.
         for lanes in [2u32, 4] {
-            let single = Params::new_with_threads(1 << 10, 2, lanes, 1, 32).expect("params");
-            let multi = Params::new_with_threads(1 << 10, 2, lanes, lanes, 32).expect("params");
+            let single = Params::builder()
+                .memory(Memory::kib(1 << 10))
+                .passes(2)
+                .lanes(lanes)
+                .threads(1)
+                .tag_len(TagLen::bytes(32))
+                .build()
+                .expect("params");
+            let multi = Params::builder()
+                .memory(Memory::kib(1 << 10))
+                .passes(2)
+                .lanes(lanes)
+                .threads(lanes)
+                .tag_len(TagLen::bytes(32))
+                .build()
+                .expect("params");
             let a = Argon2::new(Algorithm::Argon2id, Version::V0x13, single)
                 .hash(b"password", b"somesalt")
                 .expect("st");
@@ -3593,7 +3747,13 @@ mod tests {
 
     #[test]
     fn verify_round_trips_and_rejects() {
-        let params = Params::new(1 << 8, 2, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 8))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let encoded = argon2.hash_encoded(b"password", b"somesalt").expect("enc");
         assert!(encoded.starts_with("$argon2id$v=19$m=256,t=2,p=1$c29tZXNhbHQ$"));
@@ -3621,7 +3781,13 @@ mod tests {
 
     #[test]
     fn password_flavoured_names_are_the_same_functions() {
-        let params = Params::new(1 << 8, 2, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 8))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
         let mut a = [0u8; 32];
@@ -3774,7 +3940,14 @@ mod tests {
     /// check as the single-threaded one.
     #[test]
     fn a_pooled_hash_reproduces_the_one_shot_arena_word_for_word() {
-        let params = Params::new_with_threads(32, 3, 4, 4, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(32))
+            .passes(3)
+            .lanes(4)
+            .threads(4)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
 
         for algorithm in [Algorithm::Argon2d, Algorithm::Argon2i, Algorithm::Argon2id] {
             for version in [Version::V0x10, Version::V0x13] {
@@ -3810,10 +3983,36 @@ mod tests {
     #[test]
     fn hasher_agrees_with_the_one_shot_api() {
         let configs = [
-            Params::new(8, 1, 1, 32).expect("minimum"),
-            Params::new(1 << 8, 2, 1, 32).expect("st"),
-            Params::new_with_threads(1 << 9, 2, 4, 4, 32).expect("mt"),
-            Params::new_with_threads(64, 3, 2, 2, 24).expect("odd outlen"),
+            Params::builder()
+                .memory(Memory::kib(8))
+                .passes(1)
+                .lanes(1)
+                .tag_len(TagLen::bytes(32))
+                .build()
+                .expect("minimum"),
+            Params::builder()
+                .memory(Memory::kib(1 << 8))
+                .passes(2)
+                .lanes(1)
+                .tag_len(TagLen::bytes(32))
+                .build()
+                .expect("st"),
+            Params::builder()
+                .memory(Memory::kib(1 << 9))
+                .passes(2)
+                .lanes(4)
+                .threads(4)
+                .tag_len(TagLen::bytes(32))
+                .build()
+                .expect("mt"),
+            Params::builder()
+                .memory(Memory::kib(64))
+                .passes(3)
+                .lanes(2)
+                .threads(2)
+                .tag_len(TagLen::bytes(24))
+                .build()
+                .expect("odd outlen"),
         ];
 
         for params in configs {
@@ -3823,8 +4022,8 @@ mod tests {
 
                 for round in 0..4u8 {
                     let pwd = [round; 7];
-                    let mut want = alloc::vec![0u8; params.output_len()];
-                    let mut got = alloc::vec![0u8; params.output_len()];
+                    let mut want = alloc::vec![0u8; params.tag_len_bytes()];
+                    let mut got = alloc::vec![0u8; params.tag_len_bytes()];
 
                     argon2.hash_into(&pwd, b"somesalt", &mut want).expect("one");
                     hasher.hash_into(&pwd, b"somesalt", &mut got).expect("pool");
@@ -3856,9 +4055,21 @@ mod tests {
     #[test]
     fn tiny_pooled_hashes_match_the_c_reference() {
         // `printf password | ./argon2 somesalt -id -t 1 -m 3 -p 1 -l 32 -r`
-        let one_lane = Params::new(8, 1, 1, 32).expect("params");
+        let one_lane = Params::builder()
+            .memory(Memory::kib(8))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         // `printf password | ./argon2 somesalt -id -t 2 -m 4 -p 2 -l 32 -r`
-        let two_lane = Params::new(16, 2, 2, 32).expect("params");
+        let two_lane = Params::builder()
+            .memory(Memory::kib(16))
+            .passes(2)
+            .lanes(2)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
 
         let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, one_lane).hasher();
         let mut tag = [0u8; 32];
@@ -3911,7 +4122,13 @@ mod tests {
     /// land on the same allocation.
     #[test]
     fn reuse_lands_on_one_allocation() {
-        let params = Params::new(1 << 8, 2, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 8))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let blocks = params.memory_blocks() as usize;
         let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hasher();
 
@@ -3943,7 +4160,13 @@ mod tests {
     /// worthless — an arena that was never written would also read as all-zero.
     #[test]
     fn a_finished_hash_leaves_the_whole_arena_full_of_derived_material() {
-        let params = Params::new(1 << 8, 2, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 8))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let mut arena = Arena::new(params.memory_blocks() as usize).expect("arena");
         let mut out = [0u8; 32];
 
@@ -3985,7 +4208,13 @@ mod tests {
     #[test]
     #[cfg(feature = "zeroize-memory")]
     fn the_arena_a_hash_borrowed_comes_back_wiped() {
-        let params = Params::new(1 << 8, 2, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 8))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let blocks = params.memory_blocks() as usize;
         let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hasher();
 
@@ -4004,7 +4233,13 @@ mod tests {
     /// no half-released arena, no lost capacity, no wrong answer afterwards.
     #[test]
     fn an_error_does_not_disturb_reuse() {
-        let params = Params::new(1 << 8, 2, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 8))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let blocks = params.memory_blocks() as usize;
         let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hasher();
 
@@ -4037,8 +4272,20 @@ mod tests {
     /// keeps the big arena; every answer still matches the one-shot API.
     #[test]
     fn changing_the_configuration_keeps_the_memory_and_the_answers() {
-        let small = Params::new(1 << 8, 1, 1, 32).expect("small");
-        let large = Params::new(1 << 10, 1, 1, 32).expect("large");
+        let small = Params::builder()
+            .memory(Memory::kib(1 << 8))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("small");
+        let large = Params::builder()
+            .memory(Memory::kib(1 << 10))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("large");
         let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, small).hasher();
 
         let mut tag = [0u8; 32];
@@ -4047,7 +4294,7 @@ mod tests {
         for (params, label) in [(small, "small"), (large, "large"), (small, "small again")] {
             let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
             hasher.set_argon2(argon2);
-            assert_eq!(hasher.params().m_cost(), params.m_cost(), "{label}");
+            assert_eq!(hasher.params().memory_kib(), params.memory_kib(), "{label}");
             assert_eq!(hasher.algorithm(), Algorithm::Argon2id);
             assert_eq!(hasher.version(), Version::V0x13);
             assert_eq!(hasher.argon2(), &argon2);
@@ -4068,7 +4315,13 @@ mod tests {
     /// changes an answer.
     #[test]
     fn reserve_and_clear_move_the_allocation_around() {
-        let params = Params::new(1 << 8, 1, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 8))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let mut hasher = argon2.hasher();
 
@@ -4105,7 +4358,13 @@ mod tests {
     /// that takes its parameters from the string rather than from the hasher.
     #[test]
     fn hasher_encodes_and_verifies_like_argon2() {
-        let params = Params::new(1 << 8, 2, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 8))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let mut hasher = argon2.hasher();
 
@@ -4153,8 +4412,20 @@ mod tests {
     /// it, because the string is untrusted input and a pooled arena is retained.
     #[test]
     fn verifying_a_mix_of_costs_never_lets_a_string_grow_the_arena() {
-        let small = Params::new(1 << 8, 1, 1, 32).expect("small");
-        let large = Params::new(1 << 10, 1, 1, 32).expect("large");
+        let small = Params::builder()
+            .memory(Memory::kib(1 << 8))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("small");
+        let large = Params::builder()
+            .memory(Memory::kib(1 << 10))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("large");
 
         let encoded_small = Argon2::new(Algorithm::Argon2id, Version::V0x13, small)
             .hash_encoded(b"password", b"somesalt")
@@ -4206,8 +4477,20 @@ mod tests {
     /// owner's own next `hash_into` would have taken.
     #[test]
     fn a_decoded_cost_under_the_configured_one_pools_from_the_very_first_call() {
-        let tiny = Params::new(1 << 7, 1, 1, 32).expect("tiny");
-        let configured = Params::new(1 << 10, 1, 1, 32).expect("configured");
+        let tiny = Params::builder()
+            .memory(Memory::kib(1 << 7))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("tiny");
+        let configured = Params::builder()
+            .memory(Memory::kib(1 << 10))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("configured");
 
         let encoded_tiny = Argon2::new(Algorithm::Argon2id, Version::V0x13, tiny)
             .hash_encoded(b"password", b"somesalt")
@@ -4257,7 +4540,13 @@ mod tests {
     /// It must be an error, never undefined behaviour.
     #[test]
     fn a_wrongly_sized_arena_is_an_error_not_undefined_behaviour() {
-        let params = Params::new(1 << 8, 1, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 8))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         assert_eq!(params.memory_blocks(), 256);
         let mut arena = Arena::new(64).expect("64 blocks");
         let mut out = [0u8; 32];
@@ -4285,7 +4574,14 @@ mod tests {
 
     #[test]
     fn every_available_backend_agrees_with_scalar() {
-        let params = Params::new_with_threads(1 << 9, 2, 2, 2, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 9))
+            .passes(2)
+            .lanes(2)
+            .threads(2)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let mut reference = [0u8; 32];
         // SAFETY: `Backend::Scalar` is available on every CPU.
         unsafe {

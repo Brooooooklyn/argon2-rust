@@ -44,6 +44,7 @@
 //! published vector just filled — the one thing the per-vector `#[test]`s
 //! cannot check, because each of them gets a fresh arena by construction.
 
+use argon2_rust::params::{Memory, TagLen};
 use argon2_rust::{Algorithm, Argon2, Error, Params, Version};
 
 /// `test.c`'s `#define OUT_LEN 32`.
@@ -416,7 +417,12 @@ fn to_hex(bytes: &[u8]) -> String {
 
 /// Everything `hashtest()` in `test.c` asserts, for one vector.
 fn check(v: &Vector) {
-    let params = Params::new(1 << v.m_cost_log2, v.t_cost, v.lanes, OUT_LEN)
+    let params = Params::builder()
+        .memory(Memory::kib(1 << v.m_cost_log2))
+        .passes(v.t_cost)
+        .lanes(v.lanes)
+        .tag_len(TagLen::bytes(OUT_LEN as u64))
+        .build()
         .expect("test.c parameters are valid");
     let argon2 = Argon2::new(v.algorithm, v.version, params);
 
@@ -705,7 +711,15 @@ fn common_error_fail_on_invalid_memory() {
     //
     // `m_cost = 1` is below ARGON2_MIN_MEMORY (8), so this crate rejects it when
     // the `Params` are built rather than when the hash runs. Same code, earlier.
-    assert_eq!(Params::new(1, 2, 1, OUT_LEN), Err(Error::MemoryTooLittle));
+    assert_eq!(
+        Params::builder()
+            .memory(Memory::kib(1))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(OUT_LEN as u64))
+            .build(),
+        Err(Error::MemoryTooLittle)
+    );
 }
 
 #[test]
@@ -721,7 +735,13 @@ fn common_error_fail_on_invalid_null_pointer() {
 
     // The reachable neighbours of that case both work: an empty password is
     // fine (ARGON2_MIN_PWD_LENGTH is 0), and it is not the same as any other.
-    let params = Params::new(1 << 12, 2, 1, OUT_LEN).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(1 << 12))
+        .passes(2)
+        .lanes(1)
+        .tag_len(TagLen::bytes(OUT_LEN as u64))
+        .build()
+        .expect("params");
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let empty = argon2
         .hash(b"", b"diffsalt")
@@ -734,7 +754,13 @@ fn common_error_fail_on_invalid_null_pointer() {
 fn common_error_fail_on_salt_too_short() {
     // test.c:283 `argon2_hash(2, 1 << 12, 1, "password", .., "s", 1, ..)`
     //            `assert(ret == ARGON2_SALT_TOO_SHORT);`
-    let params = Params::new(1 << 12, 2, 1, OUT_LEN).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(1 << 12))
+        .passes(2)
+        .lanes(1)
+        .tag_len(TagLen::bytes(OUT_LEN as u64))
+        .build()
+        .expect("params");
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut out = [0u8; OUT_LEN];
     assert_eq!(
@@ -797,13 +823,24 @@ fn every_official_vector_survives_a_reused_arena() {
     let mut hasher = Argon2::new(
         order[0].algorithm,
         order[0].version,
-        Params::new(largest, order[0].t_cost, order[0].lanes, OUT_LEN).expect("params"),
+        Params::builder()
+            .memory(Memory::kib(u64::from(largest)))
+            .passes(order[0].t_cost)
+            .lanes(order[0].lanes)
+            .tag_len(TagLen::bytes(OUT_LEN as u64))
+            .build()
+            .expect("params"),
     )
     .hasher();
 
     let mut reserved_after_first = 0usize;
     for (step, v) in order.iter().enumerate() {
-        let params = Params::new(1 << v.m_cost_log2, v.t_cost, v.lanes, OUT_LEN)
+        let params = Params::builder()
+            .memory(Memory::kib(1 << v.m_cost_log2))
+            .passes(v.t_cost)
+            .lanes(v.lanes)
+            .tag_len(TagLen::bytes(OUT_LEN as u64))
+            .build()
             .expect("test.c parameters are valid");
         hasher.set_argon2(Argon2::new(v.algorithm, v.version, params));
 
@@ -882,7 +919,13 @@ fn password_named_api_reproduces_a_vector() {
         })
         .expect("test.c has an argon2id v=19 m=256 p=1 vector");
 
-    let params = Params::new(1 << v.m_cost_log2, v.t_cost, v.lanes, OUT_LEN).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(1 << v.m_cost_log2))
+        .passes(v.t_cost)
+        .lanes(v.lanes)
+        .tag_len(TagLen::bytes(OUT_LEN as u64))
+        .build()
+        .expect("params");
     let argon2 = Argon2::new(v.algorithm, v.version, params);
 
     let mut out = [0u8; OUT_LEN];
@@ -922,8 +965,22 @@ fn threads_do_not_change_the_tag() {
     for lanes in [2u32, 4] {
         for algorithm in [Algorithm::Argon2d, Algorithm::Argon2i, Algorithm::Argon2id] {
             for version in [Version::V0x10, Version::V0x13] {
-                let st = Params::new_with_threads(1 << 12, 2, lanes, 1, OUT_LEN).expect("st");
-                let mt = Params::new_with_threads(1 << 12, 2, lanes, lanes, OUT_LEN).expect("mt");
+                let st = Params::builder()
+                    .memory(Memory::kib(1 << 12))
+                    .passes(2)
+                    .lanes(lanes)
+                    .threads(1)
+                    .tag_len(TagLen::bytes(OUT_LEN as u64))
+                    .build()
+                    .expect("st");
+                let mt = Params::builder()
+                    .memory(Memory::kib(1 << 12))
+                    .passes(2)
+                    .lanes(lanes)
+                    .threads(lanes)
+                    .tag_len(TagLen::bytes(OUT_LEN as u64))
+                    .build()
+                    .expect("mt");
                 assert_eq!(st.effective_threads(), 1);
                 assert_eq!(mt.effective_threads(), lanes);
 
@@ -949,13 +1006,26 @@ fn threads_above_lanes_are_clamped_and_still_agree() {
     // `argon2_ctx` does `if (instance.threads > instance.lanes) instance.threads
     // = instance.lanes;`, so asking for more threads than lanes is legal and
     // changes nothing.
-    let params = Params::new_with_threads(1 << 12, 2, 2, 64, OUT_LEN).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(1 << 12))
+        .passes(2)
+        .lanes(2)
+        .threads(64)
+        .tag_len(TagLen::bytes(OUT_LEN as u64))
+        .build()
+        .expect("params");
     assert_eq!(params.effective_threads(), 2);
     let clamped = Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
         .hash(b"password", b"somesalt")
         .expect("hash");
 
-    let plain = Params::new(1 << 12, 2, 2, OUT_LEN).expect("params");
+    let plain = Params::builder()
+        .memory(Memory::kib(1 << 12))
+        .passes(2)
+        .lanes(2)
+        .tag_len(TagLen::bytes(OUT_LEN as u64))
+        .build()
+        .expect("params");
     let normal = Argon2::new(Algorithm::Argon2id, Version::V0x13, plain)
         .hash(b"password", b"somesalt")
         .expect("hash");
@@ -974,7 +1044,13 @@ const AD_SECRET: &[u8] = &[0x03; 8];
 const AD_AD: &[u8] = &[0x04; 12];
 
 fn ad_fixture() -> (Argon2, String) {
-    let params = Params::new(32, 3, 4, 32).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(32))
+        .passes(3)
+        .lanes(4)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("params");
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut tag = [0u8; 32];
     argon2
@@ -1040,7 +1116,13 @@ fn pooled_verify_encoded_with_ad_matches_the_one_shot_api() {
 
 #[test]
 fn encoded_len_is_the_c_buffer_size_including_nul() {
-    let params = Params::new(32, 3, 4, 32).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(32))
+        .passes(3)
+        .lanes(4)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("params");
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let encoded = argon2.hash_encoded(AD_PWD, AD_SALT).expect("encode");
     assert_eq!(
@@ -1063,7 +1145,13 @@ fn encoded_len_is_the_c_buffer_size_including_nul() {
 /// testing the salt source and the round trip, not the KDF.
 #[cfg(feature = "std")]
 fn rand_salt_argon2() -> Argon2 {
-    let params = Params::new(32, 1, 1, 32).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(32))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("params");
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 
@@ -1151,7 +1239,13 @@ fn pooled_random_salt_round_trips_and_stays_fresh() {
 fn bounded_verify_rejects_a_hostile_cost_without_allocating() {
     let hostile = "$argon2id$v=19$m=4294967295,t=1,p=1$c29tZXNhbHQ\
                    $CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc";
-    let ceiling = Params::new(1 << 16, 8, 4, 32).expect("ceiling");
+    let ceiling = Params::builder()
+        .memory(Memory::kib(1 << 16))
+        .passes(8)
+        .lanes(4)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("ceiling");
     assert_eq!(
         Argon2::verify_encoded_bounded(hostile, b"password", Algorithm::Argon2id, &ceiling),
         Err(Error::MemoryTooMuch)
@@ -1161,7 +1255,13 @@ fn bounded_verify_rejects_a_hostile_cost_without_allocating() {
 /// Each cost gets its own C error code, and they are checked m, t, p in order.
 #[test]
 fn bounded_verify_reports_the_c_code_for_each_cost() {
-    let ceiling = Params::new(64, 2, 1, 32).expect("ceiling");
+    let ceiling = Params::builder()
+        .memory(Memory::kib(64))
+        .passes(2)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("ceiling");
     let cases = [
         ("m=4096,t=1,p=1", Error::MemoryTooMuch),
         ("m=64,t=99,p=1", Error::TimeTooLarge),
@@ -1184,12 +1284,24 @@ fn bounded_verify_reports_the_c_code_for_each_cost() {
 /// the bound is a gate, not a different algorithm.
 #[test]
 fn bounded_verify_agrees_with_plain_verify_inside_the_ceiling() {
-    let params = Params::new(32, 1, 1, 32).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(32))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("params");
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let encoded = argon2
         .hash_encoded(b"password", b"somesalt")
         .expect("encode");
-    let ceiling = Params::new(1 << 16, 8, 4, 32).expect("ceiling");
+    let ceiling = Params::builder()
+        .memory(Memory::kib(1 << 16))
+        .passes(8)
+        .lanes(4)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("ceiling");
 
     Argon2::verify_encoded_bounded(&encoded, b"password", Algorithm::Argon2id, &ceiling)
         .expect("inside the ceiling this is just verify_encoded");
@@ -1204,7 +1316,13 @@ fn bounded_verify_agrees_with_plain_verify_inside_the_ceiling() {
         .expect("pooled bounded verify");
     assert_eq!(
         hasher.verify_encoded_bounded(&encoded, b"password", Algorithm::Argon2id, &{
-            Params::new(8, 1, 1, 32).expect("tiny ceiling")
+            Params::builder()
+                .memory(Memory::kib(8))
+                .passes(1)
+                .lanes(1)
+                .tag_len(TagLen::bytes(32))
+                .build()
+                .expect("tiny ceiling")
         }),
         Err(Error::MemoryTooMuch),
         "the pooled path must apply the ceiling too"
@@ -1216,8 +1334,20 @@ fn bounded_verify_agrees_with_plain_verify_inside_the_ceiling() {
 #[test]
 fn bounded_verify_with_ad_applies_the_ceiling_and_still_verifies() {
     let (argon2, encoded) = ad_fixture();
-    let generous = Params::new(1 << 16, 8, 4, 32).expect("ceiling");
-    let stingy = Params::new(8, 1, 1, 32).expect("tiny ceiling");
+    let generous = Params::builder()
+        .memory(Memory::kib(1 << 16))
+        .passes(8)
+        .lanes(4)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("ceiling");
+    let stingy = Params::builder()
+        .memory(Memory::kib(8))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("tiny ceiling");
 
     Argon2::verify_encoded_bounded_with_ad(
         &encoded,
@@ -1285,7 +1415,13 @@ fn bounded_verify_with_ad_applies_the_ceiling_and_still_verifies() {
 fn bounded_verify_with_ad_rejects_a_hostile_cost_without_allocating() {
     let hostile = "$argon2id$v=19$m=4294967295,t=1,p=1$c29tZXNhbHQ\
                    $CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc";
-    let ceiling = Params::new(1 << 16, 8, 4, 32).expect("ceiling");
+    let ceiling = Params::builder()
+        .memory(Memory::kib(1 << 16))
+        .passes(8)
+        .lanes(4)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("ceiling");
     assert_eq!(
         Argon2::verify_encoded_bounded_with_ad(
             hostile,
@@ -1315,7 +1451,13 @@ fn bounded_verify_with_ad_rejects_a_hostile_cost_without_allocating() {
 fn bounded_verify_rejects_an_oversized_tag_before_decoding() {
     let huge_tag = "A".repeat(4 * 1024 * 1024);
     let encoded = format!("$argon2id$v=19$m=8,t=1,p=1$c29tZXNhbHQ${huge_tag}");
-    let ceiling = Params::new(8, 1, 1, 32).expect("ceiling");
+    let ceiling = Params::builder()
+        .memory(Memory::kib(8))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("ceiling");
     assert_eq!(
         Argon2::verify_encoded_bounded(&encoded, b"pw", Algorithm::Argon2id, &ceiling),
         Err(Error::DecodingLengthFail),
@@ -1336,7 +1478,13 @@ fn bounded_verify_rejects_an_oversized_tag_before_decoding() {
     let mut hasher = Argon2::new(
         Algorithm::Argon2id,
         Version::V0x13,
-        Params::new(8, 1, 1, 32).expect("params"),
+        Params::builder()
+            .memory(Memory::kib(8))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params"),
     )
     .hasher();
     assert_eq!(
@@ -1353,29 +1501,53 @@ fn bounded_verify_rejects_an_oversized_salt_before_decoding() {
         "$argon2id$v=19$m=8,t=1,p=1${huge_salt}\
          $CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc"
     );
-    let ceiling = Params::new(8, 1, 1, 32).expect("ceiling");
+    let ceiling = Params::builder()
+        .memory(Memory::kib(8))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("ceiling");
     assert_eq!(
         Argon2::verify_encoded_bounded(&encoded, b"pw", Algorithm::Argon2id, &ceiling),
         Err(Error::DecodingLengthFail)
     );
 }
 
-/// A tag that clears the length gate but still exceeds `ceiling.output_len()`
+/// A tag that clears the length gate but still exceeds `ceiling.tag_len_bytes()`
 /// must be refused too — the ceiling is four numbers and all four count.
 #[test]
 fn bounded_verify_enforces_the_output_length_ceiling() {
     // 64-byte tag => 86 unpadded base64 chars. Short enough to pass the size
     // gate computed from a 1024-byte salt allowance, too long for the ceiling.
-    let params = Params::new(32, 1, 1, 64).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(32))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(64))
+        .build()
+        .expect("params");
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let encoded = argon2.hash_encoded(b"pw", b"somesalt").expect("encode");
-    let ceiling = Params::new(1 << 16, 8, 4, 32).expect("ceiling");
+    let ceiling = Params::builder()
+        .memory(Memory::kib(1 << 16))
+        .passes(8)
+        .lanes(4)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("ceiling");
     assert_eq!(
         Argon2::verify_encoded_bounded(&encoded, b"pw", Algorithm::Argon2id, &ceiling),
         Err(Error::OutputTooLong)
     );
     // Raise only the output ceiling and the very same string verifies.
-    let ceiling = Params::new(1 << 16, 8, 4, 64).expect("ceiling");
+    let ceiling = Params::builder()
+        .memory(Memory::kib(1 << 16))
+        .passes(8)
+        .lanes(4)
+        .tag_len(TagLen::bytes(64))
+        .build()
+        .expect("ceiling");
     Argon2::verify_encoded_bounded(&encoded, b"pw", Algorithm::Argon2id, &ceiling)
         .expect("inside every part of the ceiling");
 }
@@ -1385,10 +1557,22 @@ fn bounded_verify_enforces_the_output_length_ceiling() {
 #[test]
 fn bounded_verify_accepts_a_salt_at_the_documented_maximum() {
     let salt = vec![0x5Au8; argon2_rust::BOUNDED_MAX_SALT_LEN as usize];
-    let params = Params::new(32, 1, 1, 32).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(32))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("params");
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let encoded = argon2.hash_encoded(b"pw", &salt).expect("encode");
-    let ceiling = Params::new(1 << 16, 8, 4, 32).expect("ceiling");
+    let ceiling = Params::builder()
+        .memory(Memory::kib(1 << 16))
+        .passes(8)
+        .lanes(4)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("ceiling");
     Argon2::verify_encoded_bounded(&encoded, b"pw", Algorithm::Argon2id, &ceiling)
         .expect("a salt of exactly BOUNDED_MAX_SALT_LEN must verify");
 }
@@ -1400,7 +1584,13 @@ fn bounded_verify_accepts_a_salt_at_the_documented_maximum() {
 /// this legacy shape into a spurious `DecodingLengthFail`.
 #[test]
 fn bounded_verify_accepts_the_legacy_form_with_no_version_field() {
-    let params = Params::new(64, 2, 1, 32).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(64))
+        .passes(2)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("params");
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x10, params);
     let encoded = argon2
         .hash_encoded(b"password", b"somesalt1234")
@@ -1425,14 +1615,27 @@ fn bounded_verify_accepts_the_legacy_form_with_no_version_field() {
 #[test]
 fn bounded_verify_is_indifferent_to_the_worker_budget() {
     const LANES: u32 = 16;
-    let params = Params::new(8 * LANES, 2, LANES, 32).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(u64::from(8 * LANES)))
+        .passes(2)
+        .lanes(LANES)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("params");
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let encoded = argon2
         .hash_encoded(b"password", b"somesalt")
         .expect("encode");
 
     for budget in [1, 2, 3, LANES - 1, LANES] {
-        let ceiling = Params::new_with_threads(8 * LANES, 2, LANES, budget, 32).expect("ceiling");
+        let ceiling = Params::builder()
+            .memory(Memory::kib(u64::from(8 * LANES)))
+            .passes(2)
+            .lanes(LANES)
+            .threads(budget)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("ceiling");
         Argon2::verify_encoded_bounded(&encoded, b"password", Algorithm::Argon2id, &ceiling)
             .unwrap_or_else(|e| panic!("worker budget {budget} changed the verdict: {e:?}"));
         // and a wrong password stays wrong at every budget
@@ -1449,13 +1652,26 @@ fn bounded_verify_is_indifferent_to_the_worker_budget() {
 #[test]
 fn pooled_bounded_verify_honours_the_worker_budget() {
     const LANES: u32 = 16;
-    let params = Params::new(8 * LANES, 2, LANES, 32).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(u64::from(8 * LANES)))
+        .passes(2)
+        .lanes(LANES)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("params");
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let encoded = argon2
         .hash_encoded(b"password", b"somesalt")
         .expect("encode");
 
-    let ceiling = Params::new_with_threads(8 * LANES, 2, LANES, 1, 32).expect("ceiling");
+    let ceiling = Params::builder()
+        .memory(Memory::kib(u64::from(8 * LANES)))
+        .passes(2)
+        .lanes(LANES)
+        .threads(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("ceiling");
     let mut hasher = argon2.hasher();
     hasher
         .verify_encoded_bounded(&encoded, b"password", Algorithm::Argon2id, &ceiling)

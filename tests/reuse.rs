@@ -60,6 +60,7 @@
 
 use std::collections::BTreeSet;
 
+use argon2_rust::params::{Memory, TagLen};
 use argon2_rust::{Algorithm, Argon2, Error, Hasher, Params, Version};
 
 // ---------------------------------------------------------------------------
@@ -117,11 +118,11 @@ impl std::fmt::Debug for Case {
              pwd[{}] salt[{}] secret[{}] ad[{}]",
             self.algorithm,
             self.version.as_u32(),
-            self.params.m_cost(),
-            self.params.t_cost(),
+            self.params.memory_kib(),
+            self.params.passes(),
             self.params.lanes(),
             self.params.threads(),
-            self.params.output_len(),
+            self.params.tag_len_bytes(),
             self.params.memory_blocks(),
             self.pwd.len(),
             self.salt.len(),
@@ -144,7 +145,7 @@ impl Case {
     /// this returns. Every pooled tag in this file is compared against one of
     /// these.
     fn one_shot(&self) -> Vec<u8> {
-        let mut out = vec![0u8; self.params.output_len()];
+        let mut out = vec![0u8; self.params.tag_len_bytes()];
         self.argon2()
             .hash_into_with_ad(&self.pwd, &self.salt, &self.secret, &self.ad, &mut out)
             .unwrap_or_else(|e| panic!("one-shot hash failed for {self:?}: {e:?}"));
@@ -154,7 +155,7 @@ impl Case {
 
 /// Point a hasher at `case`'s configuration and run it, returning the tag.
 fn hash_case(hasher: &mut Hasher, case: &Case) -> Result<Vec<u8>, Error> {
-    let mut out = vec![0u8; case.params.output_len()];
+    let mut out = vec![0u8; case.params.tag_len_bytes()];
     hasher.set_argon2(case.argon2());
     hasher
         .hash_into_with_ad(&case.pwd, &case.salt, &case.secret, &case.ad, &mut out)
@@ -186,7 +187,14 @@ fn mixed_cases(seed: u64, count: usize) -> Vec<Case> {
         // let it disagree with `lanes` half the time.
         let threads = if rng.next_u64() & 1 == 0 { lanes } else { 1 };
 
-        let Ok(params) = Params::new_with_threads(m_cost, t_cost, lanes, threads, outlen) else {
+        let Ok(params) = Params::builder()
+            .memory(Memory::kib(u64::from(m_cost)))
+            .passes(t_cost)
+            .lanes(lanes)
+            .threads(threads)
+            .tag_len(TagLen::bytes(outlen as u64))
+            .build()
+        else {
             // `m_cost` below `8 * lanes` is rejected; draw again.
             continue;
         };
@@ -341,7 +349,13 @@ fn interleaving_two_hashes_gives_each_the_same_tag_every_time() {
             let a = Case {
                 algorithm,
                 version,
-                params: Params::new(64, 3, 1, 32).expect("A params"),
+                params: Params::builder()
+                    .memory(Memory::kib(64))
+                    .passes(3)
+                    .lanes(1)
+                    .tag_len(TagLen::bytes(32))
+                    .build()
+                    .expect("A params"),
                 pwd: b"password-A".to_vec(),
                 salt: b"salt-for-A".to_vec(),
                 secret: b"secretAA".to_vec(),
@@ -351,7 +365,14 @@ fn interleaving_two_hashes_gives_each_the_same_tag_every_time() {
             let b = Case {
                 algorithm,
                 version,
-                params: Params::new_with_threads(1024, 1, 4, 4, 64).expect("B params"),
+                params: Params::builder()
+                    .memory(Memory::kib(1024))
+                    .passes(1)
+                    .lanes(4)
+                    .threads(4)
+                    .tag_len(TagLen::bytes(64))
+                    .build()
+                    .expect("B params"),
                 pwd: b"a completely different password, B".to_vec(),
                 salt: b"salt-for-B-which-is-longer".to_vec(),
                 secret: Vec::new(),
@@ -414,7 +435,14 @@ fn the_predecessor_cannot_change_the_next_tag() {
     let victim = Case {
         algorithm: Algorithm::Argon2id,
         version: Version::V0x13,
-        params: Params::new_with_threads(256, 2, 2, 2, 32).expect("victim params"),
+        params: Params::builder()
+            .memory(Memory::kib(256))
+            .passes(2)
+            .lanes(2)
+            .threads(2)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("victim params"),
         pwd: b"the-victim-password".to_vec(),
         salt: b"the-victim-salt!".to_vec(),
         secret: b"vsecret1".to_vec(),
@@ -439,7 +467,14 @@ fn the_predecessor_cannot_change_the_next_tag() {
     .map(|(i, (algorithm, version, m_cost, t_cost, lanes))| Case {
         algorithm,
         version,
-        params: Params::new_with_threads(m_cost, t_cost, lanes, lanes, 32).expect("pred params"),
+        params: Params::builder()
+            .memory(Memory::kib(u64::from(m_cost)))
+            .passes(t_cost)
+            .lanes(lanes)
+            .threads(lanes)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("pred params"),
         pwd: format!("predecessor-{i}").into_bytes(),
         salt: format!("predecessor-salt-{i}").into_bytes(),
         secret: vec![i as u8; 8],
@@ -526,7 +561,13 @@ fn shrinking_and_regrowing_the_arena_is_never_silently_wrong() {
         let mut hasher = Argon2::new(
             algorithm,
             Version::V0x13,
-            Params::new(8, 1, 1, 32).expect("seed params"),
+            Params::builder()
+                .memory(Memory::kib(8))
+                .passes(1)
+                .lanes(1)
+                .tag_len(TagLen::bytes(32))
+                .build()
+                .expect("seed params"),
         )
         .hasher();
         let mut high_water = 0usize;
@@ -535,7 +576,13 @@ fn shrinking_and_regrowing_the_arena_is_never_silently_wrong() {
             let case = Case {
                 algorithm,
                 version: Version::V0x13,
-                params: Params::new_with_threads(m_cost, t_cost, lanes, lanes, 32)
+                params: Params::builder()
+                    .memory(Memory::kib(u64::from(m_cost)))
+                    .passes(t_cost)
+                    .lanes(lanes)
+                    .threads(lanes)
+                    .tag_len(TagLen::bytes(32))
+                    .build()
                     .expect("ladder params"),
                 pwd: format!("step-{step}-password").into_bytes(),
                 salt: format!("step-{step}-salt-abc").into_bytes(),
@@ -564,7 +611,13 @@ fn shrinking_and_regrowing_the_arena_is_never_silently_wrong() {
         // The ladder revisits 4096 three times; only the first may allocate.
         assert_eq!(
             hasher.reserved_blocks(),
-            Params::new_with_threads(4096, 1, 4, 4, 32)
+            Params::builder()
+                .memory(Memory::kib(4096))
+                .passes(1)
+                .lanes(4)
+                .threads(4)
+                .tag_len(TagLen::bytes(32))
+                .build()
                 .expect("params")
                 .memory_blocks() as usize
         );
@@ -581,7 +634,14 @@ fn shrinking_and_regrowing_the_arena_is_never_silently_wrong() {
 #[test]
 fn a_long_fixed_parameter_run_never_drifts() {
     for (m_cost, t_cost, lanes) in [(64u32, 1u32, 1u32), (512, 2, 4), (33, 3, 2)] {
-        let params = Params::new_with_threads(m_cost, t_cost, lanes, lanes, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(u64::from(m_cost)))
+            .passes(t_cost)
+            .lanes(lanes)
+            .threads(lanes)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hasher();
 
         let mut seen = BTreeSet::new();
@@ -632,7 +692,14 @@ fn a_rejected_input_leaves_the_hasher_correct() {
     let good = Case {
         algorithm: Algorithm::Argon2id,
         version: Version::V0x13,
-        params: Params::new_with_threads(256, 2, 2, 2, 32).expect("params"),
+        params: Params::builder()
+            .memory(Memory::kib(256))
+            .passes(2)
+            .lanes(2)
+            .threads(2)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params"),
         pwd: b"password".to_vec(),
         salt: b"somesalt-16-byte".to_vec(),
         secret: Vec::new(),
@@ -648,7 +715,7 @@ fn a_rejected_input_leaves_the_hasher_correct() {
     let reserved = hasher.reserved_blocks();
     assert_eq!(reserved, good.blocks());
 
-    // (a) `out.len()` disagrees with `params.output_len()`.
+    // (a) `out.len()` disagrees with `params.tag_len_bytes()`.
     let mut too_short = [0u8; 16];
     assert_eq!(
         hasher.hash_into(&good.pwd, &good.salt, &mut too_short),
@@ -714,7 +781,14 @@ fn reserve_and_clear_do_not_change_any_answer() {
     let case = Case {
         algorithm: Algorithm::Argon2id,
         version: Version::V0x13,
-        params: Params::new_with_threads(512, 2, 2, 2, 32).expect("params"),
+        params: Params::builder()
+            .memory(Memory::kib(512))
+            .passes(2)
+            .lanes(2)
+            .threads(2)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params"),
         pwd: b"password".to_vec(),
         salt: b"somesalt-16-byte".to_vec(),
         secret: b"secret!!".to_vec(),
@@ -776,14 +850,27 @@ fn encoded_hashes_round_trip_through_one_hasher_across_mixed_costs() {
     let mut hasher = Argon2::new(
         Algorithm::Argon2id,
         Version::V0x13,
-        Params::new(8, 1, 1, 32).expect("seed"),
+        Params::builder()
+            .memory(Memory::kib(8))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("seed"),
     )
     .hasher();
 
     // Produce the strings, cross-checking each against the one-shot encoder.
     let mut encoded = Vec::new();
     for (index, &(m_cost, t_cost, lanes)) in costs.iter().enumerate() {
-        let params = Params::new_with_threads(m_cost, t_cost, lanes, lanes, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(u64::from(m_cost)))
+            .passes(t_cost)
+            .lanes(lanes)
+            .threads(lanes)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let pwd = format!("password-{index}");
         let salt = format!("salt-number-{index}--");
@@ -821,7 +908,13 @@ fn encoded_hashes_round_trip_through_one_hasher_across_mixed_costs() {
     }
 
     // The arena settled at the largest cost the hasher was ever shown.
-    let largest = Params::new_with_threads(2048, 1, 4, 4, 32)
+    let largest = Params::builder()
+        .memory(Memory::kib(2048))
+        .passes(1)
+        .lanes(4)
+        .threads(4)
+        .tag_len(TagLen::bytes(32))
+        .build()
         .expect("params")
         .memory_blocks() as usize;
     assert_eq!(hasher.reserved_blocks(), largest);
@@ -898,7 +991,13 @@ fn the_comparator_catches_a_changed_tag() {
     let case = Case {
         algorithm: Algorithm::Argon2id,
         version: Version::V0x13,
-        params: Params::new(64, 1, 1, 32).expect("params"),
+        params: Params::builder()
+            .memory(Memory::kib(64))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params"),
         pwd: b"password".to_vec(),
         salt: b"somesalt-16-byte".to_vec(),
         secret: Vec::new(),

@@ -15,6 +15,7 @@
 //! each line is present verbatim below, so editing the README without editing
 //! this file fails the suite.
 
+use argon2_rust::params::{Memory, TagLen};
 use argon2_rust::{Algorithm, Argon2, Params, Version};
 
 /// Block 1 (quick start), block 2 (bounded verify) and block 3 (pooled
@@ -23,7 +24,13 @@ use argon2_rust::{Algorithm, Argon2, Params, Version};
 #[test]
 fn readme_examples_compile_and_run() -> Result<(), argon2_rust::Error> {
     // --- block 1 ---
-    let params = Params::new(65536, 3, 4, 32)?; // m=64 MiB, t=3, p=4, out=32 B
+    // Every setter is optional; unset ones keep `Params::DEFAULT`'s value.
+    let params = Params::builder()
+        .memory(Memory::mib(64))
+        .passes(3)
+        .lanes(4)
+        .tag_len(TagLen::bytes(32))
+        .build()?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
     let mut tag = [0u8; 32];
@@ -40,7 +47,13 @@ fn readme_examples_compile_and_run() -> Result<(), argon2_rust::Error> {
     let encoded = argon2.hash_password_with_random_salt(b"password")?;
 
     // --- block 2 ---
-    let ceiling = Params::new(1 << 16, 8, 4, 32)?; // no stored hash should exceed this
+    // No stored hash should exceed this.
+    let ceiling = Params::builder()
+        .memory(Memory::mib(64))
+        .passes(8)
+        .lanes(4)
+        .tag_len(TagLen::bytes(32))
+        .build()?;
     Argon2::verify_encoded_bounded(&encoded, b"password", Algorithm::Argon2id, &ceiling)?;
 
     // --- block 3 ---

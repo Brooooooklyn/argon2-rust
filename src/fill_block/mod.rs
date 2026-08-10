@@ -293,13 +293,19 @@ fn have_neon() -> bool {
 ))]
 fn neon_wins_here() -> bool {
     use crate::block::{Instance, Position};
-    use crate::params::{Algorithm, Params, Version};
+    use crate::params::{Algorithm, Memory, Params, TagLen, Version};
     use std::time::Instant;
 
     const M_COST: u32 = 1024;
     const REPS: usize = 6;
 
-    let params = match Params::new(M_COST, 1, 1, 32) {
+    let params = match Params::builder()
+        .memory(Memory::kib(u64::from(M_COST)))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+    {
         Ok(params) => params,
         Err(_) => return true, // unreachable at these constants; keep NEON
     };

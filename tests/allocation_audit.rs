@@ -39,6 +39,7 @@ use argon2_rust::__internal::{ARENA_ALIGN, Arena, Block, Workspace};
 // below is again a complete instrument and `released*` falls back to it.
 #[cfg(feature = "std")]
 use argon2_rust::__internal::audit;
+use argon2_rust::params::{Memory, TagLen};
 use argon2_rust::{Algorithm, Argon2, Error, Params, Version};
 
 // ---------------------------------------------------------------------------
@@ -437,8 +438,14 @@ fn acquire_owned_twice_yields_two_distinct_live_allocations() {
 #[test]
 fn concurrent_hashers_on_reused_arenas_agree_with_the_one_shot_api() {
     let lanes = if MIRI { 2 } else { 4 };
-    let params =
-        Params::new_with_threads(M_LANES4, T, lanes, lanes, 32).expect("multi lane, multi thread");
+    let params = Params::builder()
+        .memory(Memory::kib(u64::from(M_LANES4)))
+        .passes(T)
+        .lanes(lanes)
+        .threads(lanes)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("multi lane, multi thread");
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
     let mut want = [0u8; 32];
@@ -581,7 +588,13 @@ fn a_workspace_never_frees_a_dirty_arena() {
 /// every block — asserted here on a one-shot arena before anything wipes it.
 #[test]
 fn a_pooled_hash_leaves_nothing_behind_when_the_hasher_dies() {
-    let params = Params::new(M_SMALL, T, 1, 32).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(u64::from(M_SMALL)))
+        .passes(T)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("params");
     let blocks = params.memory_blocks() as usize;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
@@ -679,7 +692,13 @@ fn the_unwind_test_pattern_really_reaches_the_arena() {
 #[test]
 fn hundreds_of_pooled_hashes_do_not_allocate() {
     // 1 MiB arena, cheap parameters: big enough that a per-hash leak would show.
-    let params = Params::new(if MIRI { 8 } else { 1 << 10 }, 1, 1, 32).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(if MIRI { 8 } else { 1 << 10 }))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("params");
     let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hasher();
     let mut tag = [0u8; 32];
 
@@ -715,8 +734,20 @@ fn hundreds_of_pooled_hashes_do_not_allocate() {
 /// not reallocate on every switch, and not accumulate.
 #[test]
 fn alternating_costs_settle_on_one_arena() {
-    let small = Params::new(if MIRI { 8 } else { 1 << 8 }, 1, 1, 32).expect("small");
-    let large = Params::new(if MIRI { 32 } else { 1 << 11 }, 1, 1, 32).expect("large");
+    let small = Params::builder()
+        .memory(Memory::kib(if MIRI { 8 } else { 1 << 8 }))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("small");
+    let large = Params::builder()
+        .memory(Memory::kib(if MIRI { 32 } else { 1 << 11 }))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("large");
     let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, small).hasher();
     let mut tag = [0u8; 32];
 
@@ -848,8 +879,20 @@ fn release_wipes_the_arena_it_decides_not_to_keep() {
 /// the old, still-hot arena back to the allocator with a password in it.
 #[test]
 fn growing_a_hasher_frees_its_old_arena_wiped() {
-    let small = Params::new(M_SMALL, T, 1, 32).expect("small");
-    let large = Params::new(M_LARGE, T, 1, 32).expect("large");
+    let small = Params::builder()
+        .memory(Memory::kib(u64::from(M_SMALL)))
+        .passes(T)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("small");
+    let large = Params::builder()
+        .memory(Memory::kib(u64::from(M_LARGE)))
+        .passes(T)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("large");
     let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, small).hasher();
 
     let mut tag = [0u8; 32];
@@ -999,8 +1042,20 @@ fn an_impossible_acquire_keeps_the_parked_arena() {
 /// `argon2_verify` never retains an arena sized by the string it was given.
 #[test]
 fn verify_encoded_cannot_let_the_input_string_set_the_high_water_mark() {
-    let small = Params::new(M_SMALL, 1, 1, 32).expect("small");
-    let large = Params::new(if MIRI { 64 } else { 1 << 12 }, 1, 1, 32).expect("large");
+    let small = Params::builder()
+        .memory(Memory::kib(u64::from(M_SMALL)))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("small");
+    let large = Params::builder()
+        .memory(Memory::kib(if MIRI { 64 } else { 1 << 12 }))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("large");
     assert!(large.memory_blocks() > small.memory_blocks());
 
     let encoded_large = Argon2::new(Algorithm::Argon2id, Version::V0x13, large)
@@ -1113,7 +1168,14 @@ fn pooled_and_one_shot_agree_across_algorithms_versions_and_lanes() {
     ];
 
     for (algorithm, version, lanes) in cases {
-        let params = Params::new_with_threads(M_LANES4, T, lanes, lanes, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(u64::from(M_LANES4)))
+            .passes(T)
+            .lanes(lanes)
+            .threads(lanes)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let argon2 = Argon2::new(algorithm, version, params);
         let mut hasher = argon2.hasher();
 
@@ -1143,7 +1205,13 @@ fn pooled_and_one_shot_agree_across_algorithms_versions_and_lanes() {
 /// block before anything reads one.
 #[test]
 fn a_hash_on_a_deliberately_dirty_arena_still_matches() {
-    let params = Params::new(M_SMALL, T, 1, 32).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(u64::from(M_SMALL)))
+        .passes(T)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("params");
     let blocks = params.memory_blocks() as usize;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 

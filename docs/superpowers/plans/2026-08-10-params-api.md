@@ -24,6 +24,7 @@ Every task's requirements implicitly include this section.
 - Exactly three presets: `Params::OWASP` (equals `Params::DEFAULT`), `Params::RFC9106_HIGH_MEMORY`, `Params::RFC9106_LOW_MEMORY`.
 - `TagLen` has one constructor, `bytes()`. There is no `bits()`.
 - Every new public item needs a doc comment. `#![deny(missing_docs)]`-grade prose is the house style; match the density of the surrounding file.
+- **The docs build is a CI gate.** `ci.yml:96-108` runs `cargo doc --no-deps` and `cargo doc --no-deps --all-features`, both with `RUSTDOCFLAGS: -D warnings`. An intra-doc link to an item that does not exist yet is therefore a build failure, not a warning. Never write `[`Item`]` for something a later task introduces — use a plain code span and convert it to a link in the task that adds the item.
 - Full spec: `docs/superpowers/specs/2026-08-10-params-api-design.md`.
 
 ---
@@ -358,16 +359,28 @@ fn build_rejects_every_out_of_range_value() {
     assert_eq!(b.threads(0).build(), Err(Error::ThreadsTooFew));
 }
 
-/// `validate_inputs` checks `out_len` before `m_cost` (params.rs:381 vs :413).
-/// `build()`'s own pre-narrowing checks must keep that order, so a caller who
-/// gets both wrong sees the error the C would have reported.
+/// `validate_inputs` checks BOTH `out_len` bounds before `m_cost`
+/// (params.rs:381-386 vs :413). `build()`'s own pre-narrowing checks must keep
+/// that order, so a caller who gets both wrong sees the error the C would have
+/// reported. Both directions are pinned: checking only the upper bound first is
+/// the bug this test exists to catch.
 #[test]
 fn tag_len_is_checked_before_memory_like_the_c() {
-    let both_bad = Params::builder()
+    let too_long = Params::builder()
         .memory(Memory::gib(9999))
         .tag_len(TagLen::bytes(1 << 40))
         .build();
-    assert_eq!(both_bad, Err(Error::OutputTooLong));
+    assert_eq!(too_long, Err(Error::OutputTooLong));
+
+    // The case that a two-check implementation gets wrong: the tag is too
+    // SHORT, so only `validate_inputs` would catch it — but the memory
+    // pre-check would already have returned MemoryTooMuch. Reachable from a
+    // crafted PHC string with a 3-byte tag and a large `m=`.
+    let too_short = Params::builder()
+        .memory(Memory::kib(MAX_MEMORY as u64 + 1))
+        .tag_len(TagLen::bytes(3))
+        .build();
+    assert_eq!(too_short, Err(Error::OutputTooShort));
 }
 
 /// A saturated `Memory` must be rejected, not truncated into a legal `u32`.
@@ -494,12 +507,18 @@ impl ParamsBuilder {
         // narrowing: on a 32-bit target `(1u64 << 40) as usize` is 0, which
         // would turn OutputTooLong into OutputTooShort.
         //
-        // The order here is the C's: `validate_inputs` checks `out_len`
-        // before `m_cost`, so a caller who gets both wrong sees the same
-        // error the C would report.
+        // The order here is the C's. `validate_inputs` checks BOTH `out_len`
+        // bounds before it looks at `m_cost`, so both are checked here too —
+        // pre-checking only the upper bound would report MemoryTooMuch for a
+        // 3-byte tag combined with an over-large memory cost, where the C
+        // reports OutputTooShort. That combination is reachable from a crafted
+        // PHC string, whose tag length and `m=` are both attacker-chosen.
         let bytes = self.tag_len.as_bytes();
         if bytes > MAX_OUTLEN as u64 {
             return Err(Error::OutputTooLong);
+        }
+        if bytes < MIN_OUTLEN as u64 {
+            return Err(Error::OutputTooShort);
         }
         let kib = self.memory.as_kib();
         if kib > MAX_MEMORY as u64 {
@@ -691,15 +710,29 @@ impl Default for Params {
 }
 ```
 
-- [ ] **Step 5: Run the new tests to verify they pass**
+- [ ] **Step 5: Convert the two deferred doc links, then run the new tests**
+
+Task 1 wrote `` `ParamsBuilder::build` `` as a plain code span in two places in
+`src/params.rs` — the `Memory` type doc and the `TagLen` type doc — because the
+item did not exist yet and an unresolvable intra-doc link fails the CI docs job.
+`ParamsBuilder` exists now, so convert both to real links: `` [`ParamsBuilder::build`] ``.
 
 Run: `cargo test --lib params::tests`
 Expected: PASS, including all ten new tests.
 
-- [ ] **Step 6: Run the whole suite — nothing may have regressed**
+- [ ] **Step 6: Run the whole suite and the docs gate**
 
-Run: `cargo test --release --locked`
-Expected: PASS, 350 tests. The old constructors and accessors are still present and untouched, so every existing test still compiles.
+Run:
+```bash
+cargo test --release --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+```
+Expected: all PASS. The suite is 357 tests at this point — the 350 baseline plus
+Task 1's five unit tests and two doctests. The old constructors and accessors are
+still present and untouched, so every existing test still compiles. The two doc
+commands are the `ci.yml:96-108` gate; they must be clean now that the links from
+Step 5 resolve.
 
 - [ ] **Step 7: Commit**
 
@@ -714,15 +747,20 @@ git commit -m "feat(params): add a const ParamsBuilder, presets and typed access
 
 **Files:**
 - Modify: `src/params.rs` — delete the old accessors `m_cost()`, `t_cost()`, `output_len()`
-- Modify: `src/core.rs`, `src/encoding.rs`, `src/block.rs`, `src/fill_block/sse2.rs` — accessor renames
+- Modify: `src/core.rs`, `src/encoding.rs`, `src/block.rs`, `src/fill_block/sse2.rs`, `src/params.rs` — accessor renames
+- Modify: `tests/vectors.rs`, `tests/reuse.rs`, `benches/argon2.rs`, `benches/micro.rs` — accessor renames. These call the accessors this task deletes, so they must move in this task, not Task 4. Otherwise Step 5 cannot compile the test and bench targets.
 - Modify: `src/encoding.rs:949` — the PHC decoder builds through `ParamsBuilder`
 - Modify: `src/encoding.rs` around `:246-:293` — three doc comments describe `Params::new`'s argument order
+
+This task renames accessor *calls* everywhere. It does not touch `Params::new`
+or `Params::new_with_threads`, which still exist and still compile — Task 4
+deletes those and migrates their call sites.
 
 **Interfaces:**
 - Consumes: everything Task 2 produced
 - Produces: `Params` with only the new accessors. `lanes()`, `threads()`, `effective_threads()`, `memory_layout()`, `memory_blocks()`, `segment_length()`, `lane_length()` and `validate_for()` are unchanged and keep their names.
 
-- [ ] **Step 1: Rename the accessor calls across src/**
+- [ ] **Step 1: Rename the accessor calls everywhere**
 
 The mapping is exact and total:
 
@@ -732,21 +770,48 @@ The mapping is exact and total:
 | `.t_cost()` | `.passes()` |
 | `.output_len()` | `.tag_len_bytes()` |
 
-Apply it to the five files that call them:
+Apply it to all nine files that call them:
 
 ```bash
 sed -i '' 's/\.m_cost()/.memory_kib()/g; s/\.t_cost()/.passes()/g; s/\.output_len()/.tag_len_bytes()/g' \
-  src/core.rs src/encoding.rs src/block.rs src/fill_block/sse2.rs src/params.rs
+  src/core.rs src/encoding.rs src/block.rs src/fill_block/sse2.rs src/params.rs \
+  tests/vectors.rs tests/reuse.rs benches/argon2.rs benches/micro.rs
 ```
 
 `src/params.rs` is in that list for exactly one line: the doc example at
 `src/params.rs:357` asserts `params.output_len() == 32`. A doctest is a caller
 like any other, and `cargo test --doc` catches it if you miss it.
 
+The four files under `tests/` and `benches/` are in the list because Step 2
+deletes the accessors they call. Leaving them for Task 4 would make this task's
+own `cargo test` step fail to compile.
+
 The struct's private **fields** keep their names — `m_cost`, `t_cost`,
 `output_len` — because they mirror `argon2_context`. Only method *calls* change,
 so `self.m_cost` inside `Params`' own methods stays as it is. The sed above only
 matches call syntax, `.m_cost()`, so it cannot touch a field access.
+
+- [ ] **Step 2a: Repoint the doc links that name the accessors you are about to delete**
+
+Deleting a public item turns every `[`Item`]` link to it into an unresolvable
+link, which fails the `RUSTDOCFLAGS="-D warnings"` docs gate. The sed in Step 1
+only matches call syntax, `.output_len()`, so it does not touch these. There are
+eight, all naming `output_len`, and none naming `m_cost` or `t_cost`:
+
+| Location | Current text | Becomes |
+| --- | --- | --- |
+| `src/core.rs:1192` | ``[`Params::output_len`]`` | ``[`Params::tag_len_bytes`]`` |
+| `src/core.rs:1210` | `Params::output_len` (plain span, inside a doc example comment) | `Params::tag_len_bytes` |
+| `src/core.rs:1266` | ``[`Params::output_len`]`` | ``[`Params::tag_len_bytes`]`` |
+| `src/core.rs:1481` | ``[`Params::output_len`]`` | ``[`Params::tag_len_bytes`]`` |
+| `src/core.rs:2203` | ``[`Params::output_len`]`` | ``[`Params::tag_len_bytes`]`` |
+| `src/error.rs:91` | ``[`crate::Params::output_len`]`` | ``[`crate::Params::tag_len_bytes`]`` |
+| `src/encoding.rs:700` | ``[`Params::output_len`]`` | ``[`Params::tag_len_bytes`]`` |
+| `src/params.rs:406` | ``[`Params::output_len`]`` | ``[`Params::tag_len_bytes`]`` |
+
+Line numbers are from the state at the start of this task and will drift as you
+edit. Re-derive the list if needed with
+`grep -rn 'Params::output_len' src` — it must return nothing when you are done.
 
 - [ ] **Step 2: Delete the three old accessors**
 
@@ -780,21 +845,33 @@ Add `Memory` and `TagLen` to the file's `use crate::params::{…}` import list.
 
 `src/encoding.rs` explains, around lines 246-251, 267-268 and 293, that the PHC string's field order is the reverse of `Params::new`'s arguments. That warning exists because the old signature was positional. Rewrite each so it describes the builder: the point to preserve is that a PHC string carries `m`, then `t`, then `p`, and that the decoder must not transpose them. Delete the "reversed against `Params::new`" framing — with named setters there is no argument order to reverse — and update the two runnable examples at `:268` and `:293` to the builder spelling.
 
-- [ ] **Step 5: Build and run the whole suite**
+- [ ] **Step 5: Build and run the whole suite, including benches**
 
-Run: `cargo test --release --locked`
-Expected: PASS, 350 tests. Any missed call site is a compile error naming the file and line.
+Run:
+```bash
+cargo test --release --locked
+cargo build --release --benches
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+```
+Expected: all PASS, 369 tests. The two doc commands are the `ci.yml:96-108` gate.
+Step 2a below is what keeps them clean.
+
+`--benches` matters here: `benches/argon2.rs` and
+`benches/micro.rs` call the renamed accessors, and a plain `cargo test` does not
+compile bench targets. Any missed call site is a compile error naming the file
+and line.
 
 - [ ] **Step 6: Confirm no accessor call survives**
 
-Run: `grep -rn '\.m_cost()\|\.t_cost()\|\.output_len()' src`
+Run: `grep -rn '\.m_cost()\|\.t_cost()\|\.output_len()' src tests benches README.md`
 Expected: no output.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src
-git commit -m "refactor(params): move the crate's internals onto the typed accessors"
+git add src tests benches
+git commit -m "refactor(params): move every caller onto the typed accessors"
 ```
 
 ---
@@ -807,6 +884,10 @@ git commit -m "refactor(params): move the crate's internals onto the typed acces
 - Modify: `tests/` (7 files), `benches/` (6 files)
 - Modify: `README.md`
 
+This task is about **construction** only. Task 3 already renamed every accessor
+call, so nothing here touches `.memory_kib()`, `.passes()` or `.tag_len_bytes()`.
+What remains is every `Params::new(` and `Params::new_with_threads(` call site.
+
 **Interfaces:**
 - Consumes: everything Tasks 1-3 produced
 - Produces: a crate whose only way to build `Params` is `Params::builder()`, `Params::to_builder()`, a preset, or `Params::default()`
@@ -814,6 +895,16 @@ git commit -m "refactor(params): move the crate's internals onto the typed acces
 - [ ] **Step 1: Delete the old constructors and constants**
 
 Remove from `impl Params` in `src/params.rs`: `pub const fn new`, `pub const fn new_with_threads`, and the four `DEFAULT_*` constants. `Params::DEFAULT` replaces all four.
+
+**Before you start, one CI trap found during Task 3.** The two docs commands are
+not equivalent, and only one of them catches a whole class of error. An intra-doc
+link to an item that is public *only* behind a feature — for example
+`decode_string`, which is `#[doc(hidden)]` behind `internal-api` — makes
+`cargo doc --no-deps` fail with `rustdoc::private_intra_doc_links` while
+`cargo doc --no-deps --all-features` **passes**. This task repoints
+`Params::new` links across the crate, so it is exposed to exactly that asymmetry.
+Run the default-features leg too, and never treat the `--all-features` leg alone
+as proof.
 
 - [ ] **Step 2: Let the compiler enumerate the breakage**
 
@@ -848,7 +939,7 @@ Three rules keep the diff honest:
 - [ ] **Step 5: Run the suite, including the README test**
 
 Run: `cargo test --release --locked`
-Expected: PASS, 350 tests. `tests/readme.rs` re-extracts every ```rust block from `README.md` and asserts each line appears in its transcription, so a README block you changed without changing that file fails here.
+Expected: PASS, 369 tests — measure the count on the commit you start from rather than trusting this number, since earlier tasks moved it from 350 to 357 to 369. `tests/readme.rs` re-extracts every ```rust block from `README.md` and asserts each line appears in its transcription, so a README block you changed without changing that file fails here.
 
 - [ ] **Step 6: Run the doctests**
 
@@ -860,6 +951,21 @@ Expected: PASS, all 31 migrated examples.
 Run: `grep -rn 'Params::new\|DEFAULT_M_COST\|DEFAULT_T_COST\|DEFAULT_LANES\|DEFAULT_OUTPUT_LEN' src tests benches README.md`
 Expected: no output.
 
+- [ ] **Step 7a: Sweep stale line-number citations**
+
+This branch grows `src/params.rs` by roughly 550 lines and renames items across
+five files, so every `params.rs:NNN`-style citation written earlier in the branch
+has drifted. Two are known: the comment inside `build()` and the doc comment on
+`tag_len_is_checked_before_memory_like_the_c`, both citing `validate_inputs`'
+`out_len` and `m_cost` checks.
+
+Find them all with `grep -rn 'params\.rs:[0-9]' src`, then for each one either
+repoint it at the correct current line or, preferably, replace the number with the
+thing it identifies — `validate_inputs`' "Validate output length" and "Validate
+memory cost" comments are stable where line numbers are not. A citation that
+points at unrelated code is worse than no citation in a module whose whole claim
+is a checkable correspondence with the C.
+
 - [ ] **Step 8: Check the feature matrix and a 32-bit target**
 
 Run:
@@ -867,8 +973,12 @@ Run:
 cargo test --release --locked --no-default-features
 cargo test --release --locked --all-features
 cargo build --release --target wasm32-wasip1
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ```
-Expected: all PASS. The 32-bit narrowing tests run in CI's `i686-pc-windows-msvc` leg; locally, `cargo build --target i686-unknown-linux-gnu` at minimum type-checks the `MAX_MEMORY = 2 GiB` path if that target is installed.
+Expected: all PASS. `Params::new` appears in doc links and doc examples across the
+crate; deleting it fails the docs gate until every one is repointed, exactly as in
+Task 3's Step 2a. `grep -rn 'Params::new' src` must return nothing. The 32-bit narrowing tests run in CI's `i686-pc-windows-msvc` leg; locally, `cargo build --target i686-unknown-linux-gnu` at minimum type-checks the `MAX_MEMORY = 2 GiB` path if that target is installed.
 
 - [ ] **Step 9: Commit**
 
@@ -887,4 +997,6 @@ git commit -m "feat(params)!: replace the positional constructors with the build
 
 **Type consistency.** `memory_kib()` returns `u32` and `tag_len_bytes()` returns `usize` in every task that uses them. `Memory::as_kib()` and `TagLen::as_bytes()` return `u64` throughout. `threads` is `Option<u32>` in the builder and `u32` in `Params`, resolved only in `build()`.
 
-**Ordering risk, flagged for the implementer.** `build()` checks `tag_len` before `memory`. Task 2's `tag_len_is_checked_before_memory_like_the_c` test is what pins it; do not reorder those two blocks to read more naturally.
+**Ordering risk, flagged for the implementer.** `build()` checks *both* `tag_len` bounds before `memory`. Task 2's `tag_len_is_checked_before_memory_like_the_c` test pins both directions; do not reorder those blocks to read more naturally, and do not drop the lower-bound pre-check.
+
+**Corrected after Task 2's review.** The first version of this plan pre-checked only the upper tag bound before memory, and its test covered only the too-long case. Codex caught that `TagLen::bytes(3)` with an over-large memory cost then returns `MemoryTooMuch` where the C returns `OutputTooShort` — reachable from a crafted PHC string, since a decoded tag length and `m=` are both attacker-chosen. Verified empirically before the plan was changed, not argued from the code alone.

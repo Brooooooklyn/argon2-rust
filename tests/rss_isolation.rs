@@ -45,6 +45,7 @@
 
 use std::process::ExitCode;
 
+use argon2_rust::params::{Memory, TagLen};
 use argon2_rust::{Algorithm, Argon2, Params, Version};
 
 /// Resident set size of this process in KiB, straight from `ps(1)`.
@@ -93,7 +94,13 @@ impl Report {
 /// budget is 150x tighter than the thing it is looking for — and it can be that
 /// tight only because nothing else is running in this process.
 fn hundreds_of_pooled_hashes_do_not_grow_the_process(report: &mut Report) {
-    let params = Params::new(1 << 10, 1, 1, 32).expect("params");
+    let params = Params::builder()
+        .memory(Memory::kib(1 << 10))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("params");
     let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hasher();
     let mut tag = [0u8; 32];
 
@@ -130,8 +137,20 @@ fn hundreds_of_pooled_hashes_do_not_grow_the_process(report: &mut Report) {
 /// there, rather than reallocating on every switch or accumulating one per
 /// switch. 200 hashes alternating 256 KiB / 2 MiB.
 fn alternating_costs_do_not_grow_the_process(report: &mut Report) {
-    let small = Params::new(1 << 8, 1, 1, 32).expect("small");
-    let large = Params::new(1 << 11, 1, 1, 32).expect("large");
+    let small = Params::builder()
+        .memory(Memory::kib(1 << 8))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("small");
+    let large = Params::builder()
+        .memory(Memory::kib(1 << 11))
+        .passes(1)
+        .lanes(1)
+        .tag_len(TagLen::bytes(32))
+        .build()
+        .expect("large");
     let mut hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, small).hasher();
     let mut tag = [0u8; 32];
 

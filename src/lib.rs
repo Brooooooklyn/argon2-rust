@@ -86,7 +86,7 @@
 //! `password-hash` traits: there is no `PasswordHasher` or `PasswordVerifier`
 //! here, and no dependency that would supply one. [`Params`] carries no `serde`
 //! impls either, though its full state round-trips through the accessors and
-//! [`Params::new_with_threads`]. Interoperation is at the string level — the PHC
+//! [`Params::to_builder`]. Interoperation is at the string level — the PHC
 //! strings this crate reads and writes are the ones the `argon2` crate reads and
 //! writes.
 //!
@@ -104,7 +104,7 @@
 //! per-cost measurements.
 //!
 //! ```
-//! use argon2_rust::{Algorithm, Argon2, Hasher, Params, Version};
+//! use argon2_rust::{Algorithm, Argon2, Hasher, Params, Version, params::Memory};
 //!
 //! // Nameable, so it can be a field, a `thread_local!` or a worker slot —
 //! // which is the only shape in which reuse is worth anything.
@@ -112,7 +112,7 @@
 //!     hasher: Hasher,
 //! }
 //!
-//! let params = Params::new(1 << 8, 1, 1, 32)?;
+//! let params = Params::builder().memory(Memory::kib(1 << 8)).passes(1).build()?;
 //! let mut worker = Worker {
 //!     hasher: Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hasher(),
 //! };
@@ -142,11 +142,11 @@
 //! over-large cost while it is still a number, before anything is allocated:
 //!
 //! ```
-//! use argon2_rust::{Algorithm, Argon2, Error, Params};
+//! use argon2_rust::{Algorithm, Argon2, Error, Params, params::Memory};
 //!
 //! let hostile = "$argon2id$v=19$m=4294967295,t=1,p=1$c29tZXNhbHQ$\
 //!                CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc";
-//! let ceiling = Params::new(1 << 16, 8, 4, 32)?;
+//! let ceiling = Params::builder().memory(Memory::mib(64)).passes(8).lanes(4).build()?;
 //! assert_eq!(
 //!     Argon2::verify_encoded_bounded(hostile, b"pw", Algorithm::Argon2id, &ceiling),
 //!     Err(Error::MemoryTooMuch),
@@ -156,17 +156,26 @@
 //!
 //! Memory is not the only resource the string spends. Decoding sets
 //! `threads = lanes` (C parity), so `p` also picks how many OS threads the
-//! verify spawns; the ceiling's own `threads` bounds that, and a ceiling from
-//! [`Params::new`] bounds it together with `lanes`. Use
-//! [`Params::new_with_threads`] to accept wide strings without spawning wide.
-//! The clamp cannot change a verdict — only `lanes` feeds the tag.
+//! verify spawns; the ceiling's own `threads` bounds that, and a ceiling that
+//! leaves [`ParamsBuilder::threads`](params::ParamsBuilder::threads) unset bounds
+//! it together with `lanes`. Set that one setter to accept wide strings without
+//! spawning wide. The clamp cannot change a verdict — only `lanes` feeds the tag.
 //!
 //! # Panics
 //!
-//! Nothing reachable through the public API panics. Every failure is an
-//! [`Error`], whose numeric [`Error::as_c_code`] matches the C reference —
-//! except for the crate-specific codes below [`Error::MIN_C_CODE`], which the C
-//! has no equivalent for.
+//! No fallible path in this crate panics: hashing, verifying, encoding,
+//! decoding and parameter validation all report failure as an [`Error`], whose
+//! numeric [`Error::as_c_code`] matches the C reference — except for the
+//! crate-specific codes below [`Error::MIN_C_CODE`], which the C has no
+//! equivalent for.
+//!
+//! There is exactly one intentional exception, and it is not on a fallible
+//! path: [`ParamsBuilder::build_or_panic`](params::ParamsBuilder::build_or_panic)
+//! panics on invalid parameters. It exists so a `const` item can turn bad
+//! parameters into a *compile* error, which is what a panic in a `const`
+//! evaluation is. Anywhere a runtime error is the right answer, use
+//! [`ParamsBuilder::build`](params::ParamsBuilder::build) — it is the normal way
+//! in.
 
 #![no_std]
 #![warn(missing_docs)]

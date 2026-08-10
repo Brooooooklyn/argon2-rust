@@ -306,6 +306,7 @@ use criterion::measurement::WallTime;
 use criterion::{BenchmarkGroup, BenchmarkId, Criterion, SamplingMode, Throughput};
 
 use argon2_rust::__internal::{Backend, fill_segment_fn, hash_with_backend};
+use argon2_rust::params::{Memory, TagLen};
 use argon2_rust::{Algorithm, Argon2, Params, Version};
 
 /// Reads the ISA out of the compiled C library instead of assuming one. Shared
@@ -334,7 +335,14 @@ const LANES: [u32; 4] = [1, 2, 4, 8];
 /// Build params, or die loudly — a bench that silently skips is worse than one
 /// that stops.
 fn params(m_cost: u32, t_cost: u32, lanes: u32, threads: u32) -> Params {
-    match Params::new_with_threads(m_cost, t_cost, lanes, threads, OUTLEN) {
+    match Params::builder()
+        .memory(Memory::kib(u64::from(m_cost)))
+        .passes(t_cost)
+        .lanes(lanes)
+        .threads(threads)
+        .tag_len(TagLen::bytes(OUTLEN as u64))
+        .build()
+    {
         Ok(p) => p,
         Err(e) => panic!("bad bench params m={m_cost} t={t_cost} p={lanes}/{threads}: {e:?}"),
     }
@@ -529,7 +537,7 @@ fn rust_hash(backend: Backend, algorithm: Algorithm, p: &Params, out: &mut [u8; 
 /// Bytes of memory the algorithm touches per hash: the *aligned* block count,
 /// not the requested `m_cost`, times the number of passes.
 fn throughput_of(p: &Params) -> Throughput {
-    Throughput::Bytes(u64::from(p.memory_blocks()) * 1024 * u64::from(p.t_cost()))
+    Throughput::Bytes(u64::from(p.memory_blocks()) * 1024 * u64::from(p.passes()))
 }
 
 /// Very rough wall-clock estimate, used only to pick sample counts so the sweep
@@ -540,7 +548,7 @@ fn est_millis(p: &Params) -> f64 {
     const MS_PER_KIB_PER_PASS: f64 = 0.000_40;
     let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZero::get) as f64;
     let parallel = f64::from(p.effective_threads()).min(cpus);
-    let serial = f64::from(p.memory_blocks()) * f64::from(p.t_cost()) * MS_PER_KIB_PER_PASS;
+    let serial = f64::from(p.memory_blocks()) * f64::from(p.passes()) * MS_PER_KIB_PER_PASS;
     // 1.3 covers imperfect scaling; floor at 1 so tiny cases stay sane.
     (serial / parallel * 1.3).max(0.001)
 }
@@ -744,8 +752,8 @@ mod cref {
 /// Every runnable backend across m_cost × t_cost × lanes, Argon2id.
 ///
 /// `threads == lanes` here, which is what `argon2_hash()` in the C does and
-/// what `Params::new` does, so this measures the configuration a caller
-/// actually gets.
+/// what a builder with `.threads()` left unset does, so this measures the
+/// configuration a caller actually gets.
 fn bench_grid(c: &mut Criterion) {
     let backends = runnable_backends();
     let mut group = c.benchmark_group("grid");

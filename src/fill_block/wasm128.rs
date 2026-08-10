@@ -382,7 +382,7 @@ pub unsafe fn fill_segment(instance: &Instance, mut position: Position) {
 mod tests {
     use super::*;
     use crate::fill_block::{Backend, detect, scalar};
-    use crate::params::{Algorithm, Params, Version};
+    use crate::params::{Algorithm, Memory, Params, TagLen, Version};
 
     /// splitmix64, same stand-in as the other backend suites.
     fn sm(x: u64) -> u64 {
@@ -455,7 +455,13 @@ mod tests {
             (Algorithm::Argon2id, Version::V0x10),
             (Algorithm::Argon2id, Version::V0x13),
         ] {
-            let params = Params::new(64, 3, 4, 32).expect("params");
+            let params = Params::builder()
+                .memory(Memory::kib(64))
+                .passes(3)
+                .lanes(4)
+                .tag_len(TagLen::bytes(32))
+                .build()
+                .expect("params");
             let mut want = [0u8; 32];
             let mut got = [0u8; 32];
             // SAFETY: both backends are available in this build (this module

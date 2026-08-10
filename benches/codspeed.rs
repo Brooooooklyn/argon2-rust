@@ -22,6 +22,7 @@
 use std::time::Duration;
 
 use argon2_rust::__internal::{decode_string, encode_string_alloc};
+use argon2_rust::params::{Memory, TagLen};
 use argon2_rust::{Algorithm, Argon2, Params, Version};
 use codspeed_criterion_compat::{
     BenchmarkId, Criterion, black_box, criterion_group, criterion_main,
@@ -38,7 +39,14 @@ const TAG: [u8; OUT_LEN] = [
 ];
 
 fn params(m_cost: u32) -> Params {
-    Params::new_with_threads(m_cost, 1, 1, 1, OUT_LEN).expect("benchmark parameters must be valid")
+    Params::builder()
+        .memory(Memory::kib(u64::from(m_cost)))
+        .passes(1)
+        .lanes(1)
+        .threads(1)
+        .tag_len(TagLen::bytes(OUT_LEN as u64))
+        .build()
+        .expect("benchmark parameters must be valid")
 }
 
 fn argon2id(m_cost: u32) -> Argon2 {

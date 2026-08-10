@@ -85,7 +85,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use argon2_rust::__internal::{Block, PassTrace, hash_traced};
-use argon2_rust::params::QWORDS_IN_BLOCK;
+use argon2_rust::params::{Memory, QWORDS_IN_BLOCK, TagLen};
 use argon2_rust::{Algorithm, Argon2, Backend, Params, Version};
 
 // ---------------------------------------------------------------------------
@@ -142,7 +142,13 @@ unsafe fn generate(algorithm: Algorithm, version: Version, backend: Backend) -> 
     // `argon2_ctx` takes `threads` from `context.threads`, which `genkat.c`
     // sets to `lanes`. `threads` cannot change the tag (only `lanes` can), but
     // matching it keeps this identical to the C run in every respect.
-    let params = Params::new_with_threads(M_COST, T_COST, LANES, LANES, OUTLEN)
+    let params = Params::builder()
+        .memory(Memory::kib(u64::from(M_COST)))
+        .passes(T_COST)
+        .lanes(LANES)
+        .threads(LANES)
+        .tag_len(TagLen::bytes(OUTLEN as u64))
+        .build()
         .expect("genkat.c's parameters are valid");
 
     let mut tag = [0u8; OUTLEN];
@@ -429,7 +435,13 @@ fn public_api_reproduces_every_kat_tag() {
             .collect();
         assert_eq!(expected.len(), OUTLEN);
 
-        let params = Params::new_with_threads(M_COST, T_COST, LANES, LANES, OUTLEN)
+        let params = Params::builder()
+            .memory(Memory::kib(u64::from(M_COST)))
+            .passes(T_COST)
+            .lanes(LANES)
+            .threads(LANES)
+            .tag_len(TagLen::bytes(OUTLEN as u64))
+            .build()
             .expect("genkat.c's parameters are valid");
         let mut tag = [0u8; OUTLEN];
         Argon2::new(algorithm, version, params)
@@ -482,7 +494,13 @@ fn a_pooled_hasher_reproduces_every_kat_tag() {
 
     let expected: Vec<Vec<u8>> = files.iter().map(|(file, _, _)| golden_tag(file)).collect();
 
-    let params = Params::new_with_threads(M_COST, T_COST, LANES, LANES, OUTLEN)
+    let params = Params::builder()
+        .memory(Memory::kib(u64::from(M_COST)))
+        .passes(T_COST)
+        .lanes(LANES)
+        .threads(LANES)
+        .tag_len(TagLen::bytes(OUTLEN as u64))
+        .build()
         .expect("genkat.c's parameters are valid");
     let blocks = params.memory_blocks() as usize;
 
@@ -712,7 +730,13 @@ fn forced_avx2_reproduces_every_golden_file() {
 fn single_threaded_trace_equals_the_four_thread_golden_file() {
     let expected = read_golden("argon2id");
 
-    let params = Params::new_with_threads(M_COST, T_COST, LANES, /* threads */ 1, OUTLEN)
+    let params = Params::builder()
+        .memory(Memory::kib(u64::from(M_COST)))
+        .passes(T_COST)
+        .lanes(LANES)
+        .threads(1)
+        .tag_len(TagLen::bytes(OUTLEN as u64))
+        .build()
         .expect("genkat.c's parameters are valid");
 
     let mut tag = [0u8; OUTLEN];

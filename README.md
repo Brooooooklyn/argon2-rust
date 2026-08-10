@@ -278,9 +278,16 @@ argon2-rust = "0.0.2"
 ```
 
 ```rust
+use argon2_rust::params::{Memory, TagLen};
 use argon2_rust::{Algorithm, Argon2, Params, Version};
 
-let params = Params::new(65536, 3, 4, 32)?;          // m=64 MiB, t=3, p=4, out=32 B
+// Every setter is optional; unset ones keep `Params::DEFAULT`'s value.
+let params = Params::builder()
+    .memory(Memory::mib(64))
+    .passes(3)
+    .lanes(4)
+    .tag_len(TagLen::bytes(32))
+    .build()?;
 let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
 let mut tag = [0u8; 32];
@@ -299,7 +306,13 @@ decimal, and — exactly as in the C — nothing stands between it and the
 allocation, all 4 TiB of it. Bound it:
 
 ```rust
-let ceiling = Params::new(1 << 16, 8, 4, 32)?;   // no stored hash should exceed this
+// No stored hash should exceed this.
+let ceiling = Params::builder()
+    .memory(Memory::mib(64))
+    .passes(8)
+    .lanes(4)
+    .tag_len(TagLen::bytes(32))
+    .build()?;
 Argon2::verify_encoded_bounded(&encoded, b"password", Algorithm::Argon2id, &ceiling)?;
 ```
 
@@ -310,10 +323,10 @@ decoder runs, since the decoder sizes its salt and tag buffers from the input.
 
 Memory is not the only resource `p` spends. Decoding sets `threads = lanes`, so
 the string also picks how many OS threads the verify spawns — which
-`ceiling.threads()` bounds. `Params::new` sets `threads == lanes` and so caps
-both together; reach for `Params::new_with_threads` to accept wide strings
-without spawning wide. Clamping never changes a verdict: only `lanes` feeds the
-tag.
+`ceiling.threads()` bounds. Leaving `.threads()` unset makes it track `.lanes()`,
+so the ceiling above caps both together at 4; set `.threads(1)` on the builder to
+accept wide strings without spawning wide. Clamping never changes a verdict: only
+`lanes` feeds the tag.
 
 Hashing many passwords? Pool the arena — one allocation total instead of one
 per hash:

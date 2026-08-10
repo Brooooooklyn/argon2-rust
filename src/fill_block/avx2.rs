@@ -1144,7 +1144,7 @@ mod tests {
     #[cfg(argon2_force_avx2)]
     mod forced {
         use super::*;
-        use crate::params::{Algorithm, Params, Version};
+        use crate::params::{Algorithm, Memory, Params, TagLen, Version};
 
         /// This module exists only under `--cfg argon2_force_avx2`, so the flag
         /// must be on. A compile-time assertion rather than a runtime one: if the
@@ -1244,7 +1244,12 @@ mod tests {
                             m_cost >= 8 * lanes,
                             "grid entry m={m_cost} p={lanes} violates m_cost >= 8 * lanes"
                         );
-                        let params = Params::new(m_cost, t_cost, lanes, 32)
+                        let params = Params::builder()
+                            .memory(Memory::kib(u64::from(m_cost)))
+                            .passes(t_cost)
+                            .lanes(lanes)
+                            .tag_len(TagLen::bytes(32))
+                            .build()
                             .expect("grid params must be valid");
                         let run = |b: Backend| {
                             let mut out = [0u8; 32];
