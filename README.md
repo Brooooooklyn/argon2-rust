@@ -57,9 +57,88 @@ Lower is better for the ms columns; bigger is better for speedups.
 
 ### vs the C reference (`phc-winner-argon2`)
 
-Sapphire Rapids (`c3-standard-4`, 4 vCPU, 105 MiB L3), C built with its own
-`-march=native` — its `fill_block` contains 503 AVX-512 EVEX instructions, so
-this is the best the C can do on this machine. Argon2id:
+Measured on three hosts. Every C library is identified by **disassembling its
+`fill_block` symbol**, never by the `OPTTARGET` that was typed — see
+[Reading the C build](#reading-the-c-build).
+
+| host | CPU | cores used | memory | OS / kernel | C compiler |
+|---|---|---|---|---|---|
+| **M5 Max** | Apple M5 Max, 12P + 6E | 1 and 4 | 128 GiB | macOS 26.5.2 | Apple `cc`, `-O3` |
+| **EPYC Genoa** | AMD EPYC (family 25, model 17 = Zen 4), 2.55 GHz, 1 MiB L2/core | 4 vCPU | 12.5 GiB | Cloudflare Containers `standard-4`, Firecracker `6.18.36` | gcc 11.4.0, `-O3` |
+| **Sapphire Rapids** | Intel, `c3-standard-4`, 105 MiB L3 | 4 vCPU | — | GCE | gcc, `-O3` |
+
+Rust is `rustc 1.97.1` everywhere, bench profile (`opt-level=3`, `lto="thin"`,
+`codegen-units=1`). Argon2id, tags asserted equal on every repetition.
+
+#### Apple M5 Max — aarch64, NEON backend
+
+The reference has **no NEON path**: `src/opt.c` is x86-only, so the Makefile
+compiles `src/ref.c`. This is not an assumption — disassembling `_fill_block`
+in the built dylib gives 473 instructions and **zero NEON registers**, only
+`madd` / `eor` / `ror` on general-purpose registers.
+
+Read it as two results: `scalar` vs C is the like-for-like row, and `neon` vs C
+is what this port's SIMD buys over the only C build that exists on the platform.
+
+| config | rust scalar | rust neon | C `ref.c` | C / neon | C / scalar |
+|---|---:|---:|---:|---:|---:|
+| 64 MiB, t=1, p=1 | 20.64 ms | **13.64 ms** | 20.88 ms | **1.53x** | 1.01x |
+| 64 MiB, t=3, p=1 | 66.79 ms | **45.79 ms** | 68.93 ms | **1.51x** | 1.03x |
+| 64 MiB, t=1, p=4 | 6.01 ms | **3.93 ms** | 5.75 ms | **1.46x** | 0.96x |
+| 256 MiB, t=1, p=1 | 94.00 ms | **66.79 ms** | 96.43 ms | **1.44x** | 1.03x |
+| 256 MiB, t=3, p=4 | 80.53 ms | **62.52 ms** | 83.84 ms | **1.34x** | 1.04x |
+
+The port costs nothing against the C it is a port of (0.96x – 1.04x). NEON adds
+1.34x – 1.53x on top.
+
+#### AMD EPYC Genoa (Zen 4) — x86-64, AVX-512 backend
+
+The hardest comparison available: the reference ships hand-written AVX-512
+intrinsics, and this CPU runs them. C built in-place with the reference's own
+default `OPTTARGET=native`; the probe confirms `src/opt.c, avx512, fill_block
+3497 B: evex=498 pmuludq=32`.
+
+| config | rust scalar | rust avx512 | C AVX-512 | C / rust |
+|---|---:|---:|---:|---:|
+| 64 MiB, t=1, p=1 | 83.30 ms | **43.93 ms** | 55.99 ms | **1.27x** |
+| 64 MiB, t=3, p=1 | 182.55 ms | **77.93 ms** | 103.47 ms | **1.33x** |
+| 64 MiB, t=1, p=4 | 36.77 ms | **25.82 ms** | 33.84 ms | **1.31x** |
+| 256 MiB, t=1, p=1 | 349.63 ms | **194.38 ms** | 242.24 ms | **1.25x** |
+| 256 MiB, t=3, p=4 | 266.63 ms | **151.59 ms** | 206.89 ms | **1.36x** |
+
+Five independent runs on this host — against an explicitly-flagged
+`-mavx512f -mavx512bw -mavx512dq -mavx512vl` build and against `-march=native` —
+put the ratio at 1.17x – 1.49x, with no run disagreeing about the direction.
+Generic vs `znver3` tuning made no difference beyond noise.
+
+Note that `gcc -march=native` is worth checking rather than trusting here: gcc
+11.4 predates Zen 4, so it reports `-march=znver3`, yet the probe still finds
+`evex=498`. Native detection enables the CPUID feature bits regardless and only
+falls back for *tuning*. The instruction counts settle it; the flag name does not.
+
+Every Rust backend was also timed against the C built at the **same** ISA tier,
+interleaved rep-by-rep, two independent runs over the five configurations
+(`ARGON2_BENCH_SUMMARY_BACKEND` selects the Rust arm so the pair matches):
+
+| Rust backend | C build (probe-verified) | whole-hash range |
+|---|---|---|
+| scalar | `ref.c`, auto-vectorised to SSE2 | **0.89x – 1.04x** |
+| sse2 | `opt.c` SSE2, `vex256=14` | **1.09x – 1.31x** |
+| avx2 | `opt.c` AVX2, `vex256=288` | **1.05x – 1.31x** |
+| avx512 | `opt.c` AVX-512, `evex=496` | **1.18x – 1.44x** |
+
+The `scalar` row is the honest loss: `ref.c` at the x86-64 baseline is **not**
+scalar, because the compiler auto-vectorises it to SSE2, so `Backend::Scalar`
+is a portable fallback racing vectorised C and loses by up to 11%.
+
+That table doubles as its own noise check. Timing `scalar` against `scalar` puts
+the same code in both columns, and the ratio came back 0.98x – 1.02x, so this
+method resolves about ±2% on this host. Ratios below that are not differences.
+
+#### Sapphire Rapids — x86-64, AVX-512 backend
+
+C built with its own `-march=native` — its `fill_block` contains 503 AVX-512
+EVEX instructions, so this is the best the C can do on this machine.
 
 | config | C (native AVX-512) | argon2-rust | speedup |
 |---|---:|---:|---:|
@@ -89,9 +168,48 @@ on the data-independent path. The fixed-cost win (2.6x – 7.6x) comes from the
 page faults, and 48 `pthread_create`/`join` cycles per hash at t=3, p=4;
 this crate pays one `mmap` and 3 spawns.
 
+#### Reading the C build
+
+A comparison against "the C reference" means nothing until you know which C got
+compiled. `OPTTARGET` is not that answer: the Makefile silently falls back to
+`src/ref.c` when the `-march` probe fails, and `ref.c` at the x86-64 baseline is
+auto-vectorised to SSE2 anyway. So the label is never typed — it is read out of
+the binary. `benches/support/cref_isa.rs` finds the `fill_block` symbol and
+counts EVEX prefixes, `VEX.L=1` prefixes and `pshufb`, and prints the counts
+next to the label so the classification can be checked instead of trusted:
+
+```text
+C reference : .../libargon2.so.1 (src/opt.c, avx512, fill_block 3497 B:
+              evex=498 vex256=1 pshufb=0 pmuludq=32)
+```
+
+`pmuludq=32` is the tell for `opt.c` — two per BLAKE2 round, sixteen rounds. An
+auto-vectorised `ref.c` emits many more.
+
+#### Does loading the C through `dlopen` bias it?
+
+No, and this was measured rather than argued. The bench loads the reference with
+`dlopen` instead of linking it, and the Makefile compiles the shared library with
+`-fPIC -fvisibility=hidden` while the static archive gets neither — so the `.so`
+is genuinely different machine code, not just a different call path.
+
+One self-timed C harness was built three ways from identical source and run
+round-robin at process granularity, so drift hits all three equally:
+
+| link mode | M5 Max | EPYC Genoa |
+|---|---:|---:|
+| `libargon2.a`, direct call | 1.000x | 1.000x |
+| `-largon2` shared, PLT | 0.990x – 0.998x | 0.978x – 1.012x |
+| `dlopen`, as the bench does | 0.985x – 1.003x | 0.965x – 0.985x |
+
+`dlopen` lands *faster* than static on most rows and the sign of the difference
+flips between configurations, which is the signature of noise rather than a
+systematic cost. There is nothing in a whole hash for linkage to charge except
+one indirect call.
+
 ### vs OpenSSL 3.5 (EVP_KDF Argon2, thread pool enabled)
 
-Same machine, in-process `EVP_KDF_derive` timing, tags verified identical:
+Sapphire Rapids, in-process `EVP_KDF_derive` timing, tags verified identical:
 
 | config | OpenSSL 3.5.5 | argon2-rust | speedup |
 |---|---:|---:|---:|
@@ -275,6 +393,38 @@ cargo bench --bench micro --features internal-api -- \
 `--vs-c` loads `phc-winner-argon2/libargon2.so.1` (built with its own
 `make`) at runtime, prints the ISA genuinely inside it, and asserts tag
 equality every repetition.
+
+Build the reference first, and pin the ISA rather than trusting `native`:
+
+```console
+make -C phc-winner-argon2 clean
+make -C phc-winner-argon2 OPTTARGET=native libs                    # best on this CPU
+make -C phc-winner-argon2 OPTTARGET='x86-64 -mavx2' libs           # pinned AVX2
+make -C phc-winner-argon2 OPTTARGET=none libs                      # ref.c
+```
+
+Then check the probe line in the output before quoting any ratio. On aarch64
+every `OPTTARGET` produces `src/ref.c`, because `src/opt.c` is x86-only.
+
+For a *matched* row, pin the Rust arm to the same ISA as the C. Detection always
+returns the best backend, so on an AVX-512 host the ratio table would otherwise
+only ever compare `avx512`:
+
+```console
+# rust avx2 vs an AVX2 C, interleaved; skips the criterion groups
+ARGON2_BENCH_SUMMARY_BACKEND=avx2 ARGON2_BENCH_REUSE_ONLY=__none__ \
+    cargo bench --bench argon2 -- __no_such_group__
+```
+
+Point it at a backend the CPU cannot execute and it says so and falls back,
+rather than crashing or silently running something else.
+
+The x86-64 numbers above were taken by cross-building the bench binaries with
+`cargo zigbuild --target x86_64-unknown-linux-gnu.2.35 --release --benches` and
+running them in a container, with the C compiled by gcc on the target itself.
+The bench bakes the reference's path at compile time from
+`env!("CARGO_MANIFEST_DIR")`, so the tree must sit at the same absolute path
+when it runs as when it was built.
 
 ### Continuous benchmarking
 

@@ -28,7 +28,14 @@
 //! ARGON2_BENCH_REUSE_BIG=1          add the two 1 GiB reuse rows
 //! ARGON2_BENCH_DIST=m,t,p           dump every sample instead of benchmarking
 //! ARGON2_BENCH_FORCE=avx2           run a backend detection rejected (see below)
+//! ARGON2_BENCH_SUMMARY_BACKEND=avx2 time this backend in the ratio table
 //! ```
+//!
+//! `ARGON2_BENCH_SUMMARY_BACKEND` exists for matched Rust-vs-C rows. Detection
+//! always returns the *best* backend, so on an AVX-512 host the ratio table
+//! would otherwise only ever compare `avx512` against whichever C is installed.
+//! Point it at `avx2` with an AVX2 C library and the row becomes like-for-like.
+//! It selects among backends this CPU can execute and refuses anything else.
 //!
 //! # Groups
 //!
@@ -360,6 +367,46 @@ fn params(m_cost: u32, t_cost: u32, lanes: u32, threads: u32) -> Params {
 /// measured fact, not an assumption. Never force `avx512`: Rosetta traps it
 /// with `SIGILL`. The check below refuses it for that reason. This is a
 /// bench-only affordance and never a library path.
+/// Which backend the interleaved summary tables time as the "SIMD" arm.
+///
+/// Defaults to [`argon2_rust::detected_backend`], which is the right answer for
+/// a headline number: it is what a caller actually gets.
+///
+/// It is overridable because a *matched* Rust-vs-C row needs the Rust backend to
+/// be the same instruction set the C was built at, and detection always returns
+/// the best one. On a host that detects `avx512` there is otherwise no way to
+/// time `rust_avx2` against a C built at AVX2 using this drift-robust method —
+/// the only alternative is criterion's block design, which is the exact bias
+/// [`interleaved_samples`] exists to remove. Measured on a noisy 4-vCPU box, the
+/// two disagreed by up to 17%.
+///
+/// This is deliberately NOT `ARGON2_BENCH_FORCE`. That knob *adds* a backend
+/// detection rejected, so it can name something this CPU cannot execute; this
+/// one selects among backends that are already available, and refuses anything
+/// else rather than crash or silently fall back.
+fn summary_backend() -> Backend {
+    let detected = argon2_rust::detected_backend();
+    let Ok(spec) = std::env::var("ARGON2_BENCH_SUMMARY_BACKEND") else {
+        return detected;
+    };
+    let name = spec.trim();
+    match Backend::ALL.iter().copied().find(|b| b.name() == name) {
+        Some(b) if b.is_available() => b,
+        Some(b) => {
+            eprintln!(
+                "ARGON2_BENCH_SUMMARY_BACKEND: {} is not executable on this CPU, \
+                 using {detected}",
+                b.name()
+            );
+            detected
+        }
+        None => {
+            eprintln!("ARGON2_BENCH_SUMMARY_BACKEND: unknown backend {name:?}, using {detected}");
+            detected
+        }
+    }
+}
+
 fn runnable_backends() -> Vec<Backend> {
     let mut backends: Vec<Backend> = Backend::ALL
         .iter()
@@ -1564,6 +1611,9 @@ fn reuse_summary() {
         .unwrap_or(15);
 
     println!("\n=== arena reuse: fresh arena per hash vs one kept, interleaved, {reps} rounds ===");
+    // NOT `summary_backend()`: `reuse_samples` drives the public `Argon2` /
+    // `Hasher` API, which always dispatches to the detected backend. Printing an
+    // overridden name here would label the row with a backend it did not run.
     println!("backend      : {}", argon2_rust::detected_backend());
     println!(
         "\n{:<16} {:>9} {:>9} {:>9} {:>7} {:>7} {:>8} {:>5} {:>8} {:>5}",
@@ -1630,7 +1680,7 @@ fn interleaved_samples(
     reps: usize,
 ) -> (Vec<f64>, Vec<f64>, Option<Vec<f64>>) {
     let p = params(m_cost, t_cost, lanes, lanes);
-    let detected = argon2_rust::detected_backend();
+    let detected = summary_backend();
     let c_hash = cref::argon2_hash();
     let mut out = [0u8; OUTLEN];
 
@@ -1684,7 +1734,7 @@ fn distribution_dump() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(15usize);
 
-    let detected = argon2_rust::detected_backend();
+    let detected = summary_backend();
     let (scalar, simd, c) = interleaved_samples(m_cost, t_cost, lanes, reps);
 
     println!("\n=== sample distribution, m{m_cost}_t{t_cost}_p{lanes}, {reps} reps (ms) ===");
@@ -1756,7 +1806,7 @@ fn ratio_summary() {
     const REPS: usize = 9;
 
     let backends = runnable_backends();
-    let detected = argon2_rust::detected_backend();
+    let detected = summary_backend();
 
     println!("\n=== ratio summary: interleaved, median of {REPS} (ms) ===");
     println!("host backends: {backends:?}");
