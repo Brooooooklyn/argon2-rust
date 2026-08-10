@@ -80,6 +80,96 @@ pub const MIN_SECRET: u32 = 0;
 pub const MAX_SECRET: u32 = 0xFFFF_FFFF;
 
 // ---------------------------------------------------------------------------
+// Typed units
+// ---------------------------------------------------------------------------
+
+/// A memory cost, carried in kibibytes.
+///
+/// The unit is the point of this type. Argon2's `m_cost` is a count of 1 KiB
+/// blocks, so a bare `65536` at a call site could be read as bytes, KiB, MiB or
+/// blocks; `Memory::mib(64)` cannot.
+///
+/// No constructor validates or panics. The value is held as a `u64` and checked
+/// once, by `ParamsBuilder::build`, which is the only place that knows the
+/// target's `MAX_MEMORY`.
+///
+/// ```
+/// use argon2_rust::params::Memory;
+///
+/// assert_eq!(Memory::mib(64), Memory::kib(65536));
+/// assert_eq!(Memory::gib(1), Memory::mib(1024));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Memory(u64);
+
+impl Memory {
+    /// A cost in kibibytes, the unit Argon2's `m_cost` uses.
+    #[inline]
+    #[must_use]
+    pub const fn kib(kib: u64) -> Memory {
+        Memory(kib)
+    }
+
+    /// A cost in mebibytes.
+    ///
+    /// Saturating, not wrapping: `mib(u64::MAX)` yields `u64::MAX` KiB rather
+    /// than panicking in a debug build. Any saturated value is far above
+    /// [`MAX_MEMORY`] and becomes [`Error::MemoryTooMuch`] at `build()`.
+    #[inline]
+    #[must_use]
+    pub const fn mib(mib: u64) -> Memory {
+        Memory(mib.saturating_mul(1024))
+    }
+
+    /// A cost in gibibytes. Saturating, for the reason given on [`Memory::mib`].
+    #[inline]
+    #[must_use]
+    pub const fn gib(gib: u64) -> Memory {
+        Memory(gib.saturating_mul(1024 * 1024))
+    }
+
+    /// The cost in kibibytes.
+    #[inline]
+    #[must_use]
+    pub const fn as_kib(self) -> u64 {
+        self.0
+    }
+}
+
+/// A tag length, carried in bytes.
+///
+/// There is deliberately no `bits()` constructor: a bit count that is not a
+/// whole number of bytes would be the only new failure mode in this API, and
+/// `TagLen::bytes(32)` already names the unit at the call site. RFC 9106's
+/// "256-bit tag" is written `TagLen::bytes(32)`.
+///
+/// Like [`Memory`], this validates nothing; `ParamsBuilder::build` does.
+///
+/// ```
+/// use argon2_rust::params::TagLen;
+///
+/// assert_eq!(TagLen::bytes(32).as_bytes(), 32);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TagLen(u64);
+
+impl TagLen {
+    /// A tag length in bytes.
+    #[inline]
+    #[must_use]
+    pub const fn bytes(bytes: u64) -> TagLen {
+        TagLen(bytes)
+    }
+
+    /// The length in bytes.
+    #[inline]
+    #[must_use]
+    pub const fn as_bytes(self) -> u64 {
+        self.0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Internal constants from src/core.h
 // ---------------------------------------------------------------------------
 
@@ -893,6 +983,44 @@ mod tests {
         let p = Params::new_with_threads(1 << 16, 1, 2, 8, 32).unwrap();
         assert_eq!(p.threads(), 8);
         assert_eq!(p.effective_threads(), 2);
+    }
+
+    #[test]
+    fn memory_units_convert() {
+        assert_eq!(Memory::kib(65536), Memory::mib(64));
+        assert_eq!(Memory::mib(1024), Memory::gib(1));
+        assert_eq!(Memory::gib(2).as_kib(), 2 * 1024 * 1024);
+        assert_eq!(Memory::kib(19456).as_kib(), 19456);
+    }
+
+    /// A plain `*` would panic here in a debug build. These constructors promise
+    /// not to, so an absurd request saturates and is rejected later, by `build()`.
+    #[test]
+    fn memory_saturates_instead_of_overflowing() {
+        assert_eq!(Memory::mib(u64::MAX).as_kib(), u64::MAX);
+        assert_eq!(Memory::gib(u64::MAX).as_kib(), u64::MAX);
+        assert_eq!(Memory::gib(u64::MAX / 1024).as_kib(), u64::MAX);
+    }
+
+    #[test]
+    fn memory_orders_by_size() {
+        assert!(Memory::mib(64) > Memory::kib(19456));
+        assert!(Memory::gib(1) > Memory::mib(64));
+    }
+
+    #[test]
+    fn tag_len_carries_bytes() {
+        assert_eq!(TagLen::bytes(32).as_bytes(), 32);
+        assert!(TagLen::bytes(64) > TagLen::bytes(32));
+    }
+
+    /// Both types must be usable in a `const` item, or the builder cannot be.
+    #[test]
+    fn units_are_const() {
+        const M: Memory = Memory::mib(64);
+        const T: TagLen = TagLen::bytes(32);
+        assert_eq!(M.as_kib(), 65536);
+        assert_eq!(T.as_bytes(), 32);
     }
 
     #[test]
