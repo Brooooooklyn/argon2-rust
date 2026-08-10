@@ -362,7 +362,7 @@ pub unsafe fn fill_segment(instance: &Instance, mut position: Position) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::params::{Algorithm, Params, SYNC_POINTS, Version};
+    use crate::params::{Algorithm, Memory, Params, SYNC_POINTS, TagLen, Version};
 
     // ------------------------------------------------------------------
     // Helpers shared with the C reference harness.
@@ -869,8 +869,14 @@ mod tests {
             }
         }
 
-        let params =
-            Params::new_with_threads(m_cost, passes, lanes, 1, 32).expect("valid grid params");
+        let params = Params::builder()
+            .memory(Memory::kib(u64::from(m_cost)))
+            .passes(passes)
+            .lanes(lanes)
+            .threads(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("valid grid params");
         // SAFETY: `mem` outlives `instance` and holds exactly `memory_blocks`
         // blocks, which is what `params.memory_layout()` reports.
         let instance = unsafe {
@@ -1000,7 +1006,14 @@ mod tests {
         }
         let before = mem.clone();
 
-        let params = Params::new_with_threads(m_cost, passes, lanes, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(u64::from(m_cost)))
+            .passes(passes)
+            .lanes(lanes)
+            .threads(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         // SAFETY: `mem` outlives `instance` and holds `m_cost` blocks.
         let instance = unsafe {
             Instance::new(
@@ -1036,7 +1049,14 @@ mod tests {
         // never null, but `lane_length == 0` would make the `%` operators divide
         // by zero, and this crate must never panic.
         let mut mem = [Block::ZERO; 8];
-        let params = Params::new_with_threads(64, 1, 1, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(64))
+            .passes(1)
+            .lanes(1)
+            .threads(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         // SAFETY: `mem` outlives `instance`; the guard returns before any access.
         let mut instance = unsafe {
             Instance::new(

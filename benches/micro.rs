@@ -119,6 +119,7 @@ use argon2_rust::__internal::{
     Arena, Instance, Position, fill_first_blocks, fill_memory_blocks_traced, fill_segment_fn,
     finalize, hash_with_backend, initial_hash,
 };
+use argon2_rust::params::{Memory, TagLen};
 use argon2_rust::{Algorithm, Backend, Params, Version};
 
 #[path = "support/cref_isa.rs"]
@@ -327,7 +328,14 @@ fn spread_pct(xs: &[f64]) -> f64 {
 // ---------------------------------------------------------------------------
 
 fn make_params(m_cost: u32, t_cost: u32, lanes: u32, threads: u32) -> Params {
-    Params::new_with_threads(m_cost, t_cost, lanes, threads, OUTLEN).expect("params")
+    Params::builder()
+        .memory(Memory::kib(u64::from(m_cost)))
+        .passes(t_cost)
+        .lanes(lanes)
+        .threads(threads)
+        .tag_len(TagLen::bytes(OUTLEN as u64))
+        .build()
+        .expect("params")
 }
 
 /// Blocks a full `fill_memory_blocks` actually writes: every block of every

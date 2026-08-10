@@ -406,17 +406,17 @@ impl Version {
 /// from the receiver: the tag length (`out_len`, from [`Params::tag_len_bytes`])
 /// and the four cost values (`m_cost`, `t_cost`, `lanes`, `threads`). It leaves
 /// the caller exactly the four buffer lengths, `pwd_len`, `salt_len`,
-/// `secret_len` and `ad_len`. Those five values come from a [`Params`] that a
-/// constructor already ran through this function, so they cannot drift from the
-/// costs the hash will actually run with, and `core` takes that route on every
-/// hash.
+/// `secret_len` and `ad_len`. Those five values come from a [`Params`] that
+/// [`ParamsBuilder::build`] already ran through this function, so they cannot
+/// drift from the costs the hash will actually run with, and `core` takes that
+/// route on every hash.
 ///
 /// Reach for this function directly only when the C's exact check ordering is
 /// what is wanted, which is the one thing the `Params` route cannot give you:
-/// [`Params::new`] and [`Params::new_with_threads`] validate the cost parameters
-/// at construction time, so a caller who supplies both a bad `m_cost` and a
-/// short salt sees the `m_cost` error where the C reports
-/// `ARGON2_SALT_TOO_SHORT` (the divergence note on [`Params`] spells this out).
+/// [`ParamsBuilder::build`] validates the cost parameters at construction time,
+/// so a caller who supplies both a bad `m_cost` and a short salt sees the
+/// `m_cost` error where the C reports `ARGON2_SALT_TOO_SHORT` (the divergence
+/// note on [`Params`] spells this out).
 /// `decode_string` is the in-crate example: it calls this function directly on
 /// the decoded fields and only builds its `Params` afterwards, so that a
 /// malformed PHC string yields the same error code `validate_inputs()`
@@ -424,9 +424,9 @@ impl Version {
 ///
 /// ```
 /// use argon2_rust::Error;
-/// use argon2_rust::params::{Params, validate_inputs};
+/// use argon2_rust::params::{Memory, Params, validate_inputs};
 ///
-/// let params = Params::new(19_456, 2, 1, 32)?;
+/// let params = Params::builder().memory(Memory::kib(19_456)).passes(2).build()?;
 ///
 /// // Four arguments. The tag length and the four costs come from `params`.
 /// assert_eq!(params.validate_for(8, 16, 0, 0), Ok(()));
@@ -547,14 +547,20 @@ pub const fn validate_inputs(
 /// `m_cost`, `t_cost`, `lanes`, `threads` and `outlen`. Password, salt, secret
 /// and associated data are passed per call.
 ///
-/// A `Params` value can only be built through a constructor that runs
-/// [`validate_inputs`], so `lanes >= 1` always holds and the derived values
-/// below never divide by zero.
+/// There is no public field and no public constructor: every `Params` comes out
+/// of [`ParamsBuilder::build`], which runs [`validate_inputs`], or out of a
+/// preset ([`Params::DEFAULT`], [`Params::OWASP`],
+/// [`Params::RFC9106_HIGH_MEMORY`], [`Params::RFC9106_LOW_MEMORY`]) that
+/// `build`'s `const` twin already ran. So `lanes >= 1` always holds and the
+/// derived values below never divide by zero.
+///
+/// Start from [`Params::builder`], or from [`Params::to_builder`] to adjust an
+/// existing value.
 ///
 /// # Known divergence from the C reference
 ///
-/// The constructors validate the cost parameters immediately, whereas the C
-/// checks salt length *before* `m_cost`. If a caller supplies both a bad
+/// [`ParamsBuilder::build`] validates the cost parameters immediately, whereas
+/// the C checks salt length *before* `m_cost`. If a caller supplies both a bad
 /// `m_cost` and a short salt, this crate reports the `m_cost` error at
 /// `Params` construction time while the C reports `ARGON2_SALT_TOO_SHORT`.
 /// Call [`validate_inputs`] directly to reproduce the C ordering exactly.
@@ -641,8 +647,54 @@ impl ParamsBuilder {
 
     /// Set the worker-thread budget.
     ///
-    /// A pure performance knob: it does not affect the tag. Left unset, it
-    /// tracks `lanes`. See [`Params::effective_threads`].
+    /// A pure performance knob: it does **not** affect the tag. Only `lanes`
+    /// does. Left unset it tracks [`ParamsBuilder::lanes`], which is what
+    /// `argon2_hash()` does — it sets both `context.lanes` and
+    /// `context.threads` from its single `parallelism` argument. The effective
+    /// count is `min(threads, lanes)`, see [`Params::effective_threads`].
+    ///
+    /// ```
+    /// use argon2_rust::{Algorithm, Argon2, Params, Version, params::Memory};
+    ///
+    /// // Four lanes of work, but never more than two OS threads to run them.
+    /// let budgeted = Params::builder()
+    ///     .memory(Memory::kib(64))
+    ///     .passes(1)
+    ///     .lanes(4)
+    ///     .threads(2)
+    ///     .build()?;
+    /// assert_eq!((budgeted.lanes(), budgeted.threads()), (4, 2));
+    /// assert_eq!(budgeted.effective_threads(), 2);
+    ///
+    /// // Asking for more threads than lanes is legal, and the extra workers
+    /// // simply have no lane to claim.
+    /// let oversubscribed = Params::builder()
+    ///     .memory(Memory::kib(64))
+    ///     .passes(1)
+    ///     .lanes(2)
+    ///     .threads(8)
+    ///     .build()?;
+    /// assert_eq!(oversubscribed.effective_threads(), 2);
+    ///
+    /// // Leaving it unset is exactly `threads == lanes`.
+    /// let full = Params::builder()
+    ///     .memory(Memory::kib(64))
+    ///     .passes(1)
+    ///     .lanes(4)
+    ///     .build()?;
+    /// assert_eq!(full, budgeted.to_builder().threads(4).build()?);
+    /// assert_eq!(full.threads(), 4);
+    ///
+    /// // And the knob really is free of the tag: same `lanes`, same bytes,
+    /// // whichever thread budget produced them.
+    /// let two_workers = Argon2::new(Algorithm::Argon2id, Version::V0x13, budgeted);
+    /// let four_workers = Argon2::new(Algorithm::Argon2id, Version::V0x13, full);
+    /// assert_eq!(
+    ///     two_workers.hash(b"password", b"somesalt")?,
+    ///     four_workers.hash(b"password", b"somesalt")?,
+    /// );
+    /// # Ok::<(), argon2_rust::Error>(())
+    /// ```
     #[inline]
     #[must_use]
     pub const fn threads(mut self, threads: u32) -> ParamsBuilder {
@@ -755,15 +807,6 @@ impl Default for ParamsBuilder {
 }
 
 impl Params {
-    /// Default memory cost in KiB (19 MiB), per the OWASP Argon2id guidance.
-    pub const DEFAULT_M_COST: u32 = 19456;
-    /// Default number of passes.
-    pub const DEFAULT_T_COST: u32 = 2;
-    /// Default degree of parallelism.
-    pub const DEFAULT_LANES: u32 = 1;
-    /// Default tag length in bytes.
-    pub const DEFAULT_OUTPUT_LEN: usize = 32;
-
     /// The recommended default: OWASP's Argon2id profile.
     ///
     /// 19 MiB, two passes, one lane, a 32-byte tag. Equal to [`Params::OWASP`]
@@ -862,93 +905,6 @@ impl Params {
     #[must_use]
     pub const fn tag_len_bytes(&self) -> usize {
         self.output_len as usize
-    }
-
-    /// Validate and build parameters, with `threads == lanes`.
-    ///
-    /// This matches `argon2_hash()`, which sets both `context.lanes` and
-    /// `context.threads` from its single `parallelism` argument.
-    ///
-    /// # Errors
-    ///
-    /// Any of the cost-parameter errors from [`validate_inputs`].
-    pub const fn new(
-        m_cost: u32,
-        t_cost: u32,
-        lanes: u32,
-        output_len: usize,
-    ) -> Result<Params, Error> {
-        Params::new_with_threads(m_cost, t_cost, lanes, lanes, output_len)
-    }
-
-    /// Validate and build parameters with an explicit thread count.
-    ///
-    /// `threads` is a pure performance knob: it does **not** affect the tag.
-    /// Only `lanes` does. The effective count is `min(threads, lanes)`, see
-    /// [`Params::effective_threads`].
-    ///
-    /// ```
-    /// use argon2_rust::{Algorithm, Argon2, Params, Version};
-    ///
-    /// // Four lanes of work, but never more than two OS threads to run them.
-    /// let budgeted = Params::new_with_threads(64, 1, 4, 2, 32)?;
-    /// assert_eq!((budgeted.lanes(), budgeted.threads()), (4, 2));
-    /// assert_eq!(budgeted.effective_threads(), 2);
-    ///
-    /// // Asking for more threads than lanes is legal, and the extra workers
-    /// // simply have no lane to claim.
-    /// let oversubscribed = Params::new_with_threads(64, 1, 2, 8, 32)?;
-    /// assert_eq!(oversubscribed.effective_threads(), 2);
-    ///
-    /// // `Params::new` is exactly this call with `threads == lanes`.
-    /// let full = Params::new(64, 1, 4, 32)?;
-    /// assert_eq!(full, Params::new_with_threads(64, 1, 4, 4, 32)?);
-    ///
-    /// // And the knob really is free of the tag: same `lanes`, same bytes,
-    /// // whichever thread budget produced them.
-    /// let two_workers = Argon2::new(Algorithm::Argon2id, Version::V0x13, budgeted);
-    /// let four_workers = Argon2::new(Algorithm::Argon2id, Version::V0x13, full);
-    /// assert_eq!(
-    ///     two_workers.hash(b"password", b"somesalt")?,
-    ///     four_workers.hash(b"password", b"somesalt")?,
-    /// );
-    /// # Ok::<(), argon2_rust::Error>(())
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Any of the cost-parameter errors from [`validate_inputs`].
-    pub const fn new_with_threads(
-        m_cost: u32,
-        t_cost: u32,
-        lanes: u32,
-        threads: u32,
-        output_len: usize,
-    ) -> Result<Params, Error> {
-        // Feed placeholder lengths that always pass their own checks, so the
-        // *relative* order of the checks that do apply is exactly the C's.
-        match validate_inputs(
-            output_len,
-            0,
-            MIN_SALT_LENGTH as usize,
-            0,
-            0,
-            m_cost,
-            t_cost,
-            lanes,
-            threads,
-        ) {
-            Ok(()) => {}
-            Err(e) => return Err(e),
-        }
-        Ok(Params {
-            m_cost,
-            t_cost,
-            lanes,
-            threads,
-            // `output_len <= MAX_OUTLEN == u32::MAX` was just checked.
-            output_len: output_len as u32,
-        })
     }
 
     /// Run the full `validate_inputs()` sequence for a concrete call.
@@ -1130,17 +1086,23 @@ mod tests {
     /// documented 255, and an 8-byte tag against a documented 12. The strings
     /// were pasted in from a run of this crate and nothing recomputed them, so
     /// a change to `encode_string`, to the tag derivation, or to what
-    /// `Params::new` does with `m_cost` would leave the docs quoting output the
-    /// crate no longer produces, with no test failing. Reproduced here from the
-    /// parameters those docs state, byte for byte, and verified back through
-    /// `verify_encoded` so the word "round-trips" is pinned too.
+    /// `ParamsBuilder::build` does with `m_cost` would leave the docs quoting
+    /// output the crate no longer produces, with no test failing. Reproduced
+    /// here from the parameters those docs state, byte for byte, and verified
+    /// back through `verify_encoded` so the word "round-trips" is pinned too.
     #[test]
     fn decoded_bound_docs_quote_strings_this_crate_still_produces() {
         use crate::Argon2;
 
         // `MAX_DECODED_LANES` is 255 and this is `p=300`. `m=2400` is forced by
         // `validate_inputs`' `m_cost >= 8 * lanes` rule, not by 255.
-        let params = Params::new(2400, 1, 300, 32).unwrap();
+        let params = Params::builder()
+            .memory(Memory::kib(2400))
+            .passes(1)
+            .lanes(300)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let encoded = argon2.hash_encoded(b"password", b"somesalt").unwrap();
         assert_eq!(
@@ -1155,7 +1117,13 @@ mod tests {
         // `MIN_DECODED_OUT_LEN` is 12 and this tag is 8 bytes, which `MIN_OUTLEN`
         // (4) allows. Same `m` and salt as above so the two strings differ only
         // where the docs say they do.
-        let params = Params::new(2400, 1, 1, 8).unwrap();
+        let params = Params::builder()
+            .memory(Memory::kib(2400))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(8))
+            .build()
+            .unwrap();
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let encoded = argon2.hash_encoded(b"password", b"somesalt").unwrap();
         assert_eq!(
@@ -1219,19 +1187,43 @@ mod tests {
     #[test]
     fn memory_layout_matches_argon2_ctx() {
         // m_cost below the floor gets bumped to 2 * SYNC_POINTS * lanes.
-        let p = Params::new(8, 1, 1, 32).unwrap();
+        let p = Params::builder()
+            .memory(Memory::kib(8))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         assert_eq!(p.memory_layout(), (8, 2, 8));
 
         // 1 << 16 KiB, one lane: 65536 blocks, 16384 per segment.
-        let p = Params::new(1 << 16, 2, 1, 32).unwrap();
+        let p = Params::builder()
+            .memory(Memory::kib(1 << 16))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         assert_eq!(p.memory_layout(), (65536, 16384, 65536));
 
         // Four lanes: segment_length = 65536 / 16 = 4096, lane_length = 16384.
-        let p = Params::new(1 << 16, 2, 4, 32).unwrap();
+        let p = Params::builder()
+            .memory(Memory::kib(1 << 16))
+            .passes(2)
+            .lanes(4)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         assert_eq!(p.memory_layout(), (65536, 4096, 16384));
 
         // Not a multiple of lanes * SYNC_POINTS: truncated down.
-        let p = Params::new(100, 1, 3, 32).unwrap();
+        let p = Params::builder()
+            .memory(Memory::kib(100))
+            .passes(1)
+            .lanes(3)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         let (blocks, seg, lane) = p.memory_layout();
         assert_eq!(seg, 100 / 12);
         assert_eq!(blocks, seg * 12);
@@ -1240,7 +1232,14 @@ mod tests {
 
     #[test]
     fn effective_threads_is_min() {
-        let p = Params::new_with_threads(1 << 16, 1, 2, 8, 32).unwrap();
+        let p = Params::builder()
+            .memory(Memory::kib(1 << 16))
+            .passes(1)
+            .lanes(2)
+            .threads(8)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         assert_eq!(p.threads(), 8);
         assert_eq!(p.effective_threads(), 2);
     }
@@ -1399,11 +1398,12 @@ mod tests {
         assert_eq!(b.threads(0).build(), Err(Error::ThreadsTooFew));
     }
 
-    /// `validate_inputs` checks BOTH `out_len` bounds before `m_cost`
-    /// (params.rs:470-476 vs :502). `build()`'s own pre-narrowing checks must
-    /// keep that order, so a caller who gets both wrong sees the error the C
-    /// would have reported. Both directions are pinned: checking only the upper
-    /// bound first is the bug this test exists to catch.
+    /// `validate_inputs` checks BOTH `out_len` bounds before `m_cost`: its
+    /// "Validate output length" block runs before its "Validate memory cost"
+    /// block. `build()`'s own pre-narrowing checks must keep that order, so a
+    /// caller who gets both wrong sees the error the C would have reported.
+    /// Both directions are pinned: checking only the upper bound first is the
+    /// bug this test exists to catch.
     #[test]
     fn tag_len_is_checked_before_memory_like_the_c() {
         let too_long = Params::builder()

@@ -2180,7 +2180,7 @@ mod tests {
 
     use crate::core::hash_traced;
     use crate::fill_block::{Backend, detect, scalar};
-    use crate::params::{Algorithm, Params, QWORDS_IN_BLOCK, Version};
+    use crate::params::{Algorithm, Memory, Params, QWORDS_IN_BLOCK, TagLen, Version};
 
     /// splitmix64: a deterministic, reproducible stand-in for a random source.
     /// The same generator `scalar`'s tests use, so the two suites can be
@@ -2591,7 +2591,13 @@ mod tests {
                         // Small but > 128 blocks per segment for lanes == 1, so
                         // `next_addresses` runs more than once per segment.
                         for m_cost in [8 * lanes, 4 * 128 * lanes, 4 * 200 * lanes + 3] {
-                            let params = Params::new(m_cost, t_cost, lanes, 32).expect("params");
+                            let params = Params::builder()
+                                .memory(Memory::kib(u64::from(m_cost)))
+                                .passes(t_cost)
+                                .lanes(lanes)
+                                .tag_len(TagLen::bytes(32))
+                                .build()
+                                .expect("params");
                             let want = hash(Backend::Scalar, alg, ver, &params, b"somesalt");
                             let got = hash(Backend::Neon, alg, ver, &params, b"somesalt");
                             assert_eq!(
@@ -2616,7 +2622,13 @@ mod tests {
         //
         // This is the test that stops a *faster wrong answer* from surviving
         // the shootout.
-        let params = Params::new(4 * 32, 1, 1, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(4 * 32))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         let (memory_blocks, _, _) = params.memory_layout();
         let n = memory_blocks as usize;
 
@@ -2746,9 +2758,21 @@ mod tests {
         // outside its own segment would be caught.
         for lanes in [2u32, 4] {
             for threads in 1..=lanes {
-                let single =
-                    Params::new_with_threads(4 * 40 * lanes, 2, lanes, 1, 32).expect("params");
-                let multi = Params::new_with_threads(4 * 40 * lanes, 2, lanes, threads, 32)
+                let single = Params::builder()
+                    .memory(Memory::kib(u64::from(4 * 40 * lanes)))
+                    .passes(2)
+                    .lanes(lanes)
+                    .threads(1)
+                    .tag_len(TagLen::bytes(32))
+                    .build()
+                    .expect("params");
+                let multi = Params::builder()
+                    .memory(Memory::kib(u64::from(4 * 40 * lanes)))
+                    .passes(2)
+                    .lanes(lanes)
+                    .threads(threads)
+                    .tag_len(TagLen::bytes(32))
+                    .build()
                     .expect("params");
                 assert_eq!(
                     hash(
@@ -2791,7 +2815,13 @@ mod tests {
         salt: &[u8],
         want_hex: &str,
     ) {
-        let params = Params::new(1 << m_log2, t_cost, lanes, 32).expect("params");
+        let params = Params::builder()
+            .memory(Memory::kib(1 << m_log2))
+            .passes(t_cost)
+            .lanes(lanes)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("params");
         assert!(
             Backend::Neon.is_available(),
             "NEON is baseline on aarch64; forcing it without it would be UB"
@@ -3304,7 +3334,13 @@ mod tests {
             (65536, 2),
             (262144, 2),
         ] {
-            let params = Params::new(m_cost, passes, 1, 32).expect("params");
+            let params = Params::builder()
+                .memory(Memory::kib(u64::from(m_cost)))
+                .passes(passes)
+                .lanes(1)
+                .tag_len(TagLen::bytes(32))
+                .build()
+                .expect("params");
             let (memory_blocks, _, _) = params.memory_layout();
             let n = memory_blocks as usize;
             let blocks_filled = f64::from(memory_blocks) * f64::from(passes);
@@ -3489,7 +3525,13 @@ mod tests {
             ("m=4096 (4 MiB, cache-resident)", 4096u32),
             ("m=65536 (64 MiB, DRAM-bound)", 1 << 16),
         ] {
-            let params = Params::new(m_cost, 2, 1, 32).expect("params");
+            let params = Params::builder()
+                .memory(Memory::kib(u64::from(m_cost)))
+                .passes(2)
+                .lanes(1)
+                .tag_len(TagLen::bytes(32))
+                .build()
+                .expect("params");
             let (memory_blocks, _, _) = params.memory_layout();
             let n = memory_blocks as usize;
             let blocks_filled = f64::from(memory_blocks) * 2.0;
@@ -3559,7 +3601,13 @@ mod tests {
             ("m=1024 (1 MiB, L2)", 1024u32),
             ("m=65536 (64 MiB)", 1 << 16),
         ] {
-            let params = Params::new(m_cost, 3, 1, 32).expect("params");
+            let params = Params::builder()
+                .memory(Memory::kib(u64::from(m_cost)))
+                .passes(3)
+                .lanes(1)
+                .tag_len(TagLen::bytes(32))
+                .build()
+                .expect("params");
             let blocks = f64::from(m_cost) * 3.0;
 
             let once = |backend: Backend| {

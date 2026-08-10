@@ -956,7 +956,8 @@ pub(crate) mod test_support {
     use crate::fill_block::{Backend, FillSegmentFn};
     use crate::memory::{Arena, clear_internal_memory};
     use crate::params::{
-        Algorithm, PREHASH_DIGEST_LENGTH, Params, QWORDS_IN_BLOCK, SYNC_POINTS, Version,
+        Algorithm, Memory, PREHASH_DIGEST_LENGTH, Params, QWORDS_IN_BLOCK, SYNC_POINTS, TagLen,
+        Version,
     };
 
     // ------------------------------------------------------------------
@@ -1224,7 +1225,12 @@ pub(crate) mod test_support {
             if !group.contains(v) || (v.large_ram && !include_large_ram) {
                 continue;
             }
-            let params = Params::new(1 << v.m_log2, v.t, v.p, 32)
+            let params = Params::builder()
+                .memory(Memory::kib(1 << v.m_log2))
+                .passes(v.t)
+                .lanes(v.p)
+                .tag_len(TagLen::bytes(32))
+                .build()
                 .unwrap_or_else(|e| panic!("test.c:{} params rejected: {e}", v.line));
             let mut out = [0u8; 32];
             // SAFETY: forwarded verbatim from this function's own contract —
@@ -1399,7 +1405,12 @@ pub(crate) mod test_support {
             if v.large_ram || v.m_log2 > 16 {
                 continue;
             }
-            let params = Params::new(1 << v.m_log2, v.t, v.p, 32)
+            let params = Params::builder()
+                .memory(Memory::kib(1 << v.m_log2))
+                .passes(v.t)
+                .lanes(v.p)
+                .tag_len(TagLen::bytes(32))
+                .build()
                 .unwrap_or_else(|e| panic!("test.c:{} params rejected: {e}", v.line));
             let mut out = [0u8; 32];
             // SAFETY: the caller guarantees the CPU supports `fill`.

@@ -306,6 +306,7 @@ use criterion::measurement::WallTime;
 use criterion::{BenchmarkGroup, BenchmarkId, Criterion, SamplingMode, Throughput};
 
 use argon2_rust::__internal::{Backend, fill_segment_fn, hash_with_backend};
+use argon2_rust::params::{Memory, TagLen};
 use argon2_rust::{Algorithm, Argon2, Params, Version};
 
 /// Reads the ISA out of the compiled C library instead of assuming one. Shared
@@ -334,7 +335,14 @@ const LANES: [u32; 4] = [1, 2, 4, 8];
 /// Build params, or die loudly — a bench that silently skips is worse than one
 /// that stops.
 fn params(m_cost: u32, t_cost: u32, lanes: u32, threads: u32) -> Params {
-    match Params::new_with_threads(m_cost, t_cost, lanes, threads, OUTLEN) {
+    match Params::builder()
+        .memory(Memory::kib(u64::from(m_cost)))
+        .passes(t_cost)
+        .lanes(lanes)
+        .threads(threads)
+        .tag_len(TagLen::bytes(OUTLEN as u64))
+        .build()
+    {
         Ok(p) => p,
         Err(e) => panic!("bad bench params m={m_cost} t={t_cost} p={lanes}/{threads}: {e:?}"),
     }
@@ -744,8 +752,8 @@ mod cref {
 /// Every runnable backend across m_cost × t_cost × lanes, Argon2id.
 ///
 /// `threads == lanes` here, which is what `argon2_hash()` in the C does and
-/// what `Params::new` does, so this measures the configuration a caller
-/// actually gets.
+/// what a builder with `.threads()` left unset does, so this measures the
+/// configuration a caller actually gets.
 fn bench_grid(c: &mut Criterion) {
     let backends = runnable_backends();
     let mut group = c.benchmark_group("grid");

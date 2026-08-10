@@ -5,6 +5,8 @@
 //! `phc-winner-argon2/src/core.h`.
 
 use crate::params::{Algorithm, BLOCK_SIZE, Params, QWORDS_IN_BLOCK, SYNC_POINTS, Version};
+#[cfg(test)]
+use crate::params::{Memory, TagLen};
 
 // ---------------------------------------------------------------------------
 // Block
@@ -439,7 +441,13 @@ mod tests {
 
     #[test]
     fn with_xor_follows_version() {
-        let params = Params::new(1 << 12, 2, 1, 32).unwrap();
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 12))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         let mut arena = [Block::ZERO; 2];
         // SAFETY: `arena` outlives `inst`, and we never index it here.
         let inst = unsafe {
@@ -470,7 +478,13 @@ mod tests {
 
     #[test]
     fn data_independent_addressing_matches_ref_c() {
-        let params = Params::new(1 << 12, 2, 1, 32).unwrap();
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 12))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         let mut arena = [Block::ZERO; 2];
         let ptr = arena.as_mut_ptr();
         let len = arena.len();
@@ -499,7 +513,13 @@ mod tests {
 
     #[test]
     fn address_input_block_layout() {
-        let params = Params::new(1 << 16, 3, 2, 32).unwrap();
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 16))
+            .passes(3)
+            .lanes(2)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         let mut arena = [Block::ZERO; 2];
         // SAFETY: `arena` outlives `inst`; no indexing happens.
         let inst = unsafe {

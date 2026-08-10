@@ -131,6 +131,7 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 use argon2_rust::__internal::{hash_with_backend, validate_inputs};
+use argon2_rust::params::{Memory, TagLen};
 use argon2_rust::{Algorithm, Argon2, Backend, Error, Hasher, Params, Version};
 
 /// The one constant the whole sweep hangs off. Change it to explore a
@@ -470,7 +471,7 @@ impl Case {
 
     /// This crate's answer, following `argon2_ctx()` step for step.
     ///
-    /// `validate_inputs` runs first and separately because `Params::new*`
+    /// `validate_inputs` runs first and separately because `ParamsBuilder::build`
     /// validates on construction with placeholder buffer lengths, so it would
     /// otherwise report a cost error where the C reports (say)
     /// `ARGON2_SALT_TOO_SHORT`. `params.rs` documents this and points at
@@ -492,13 +493,13 @@ impl Case {
             self.threads,
         )?;
 
-        let params = Params::new_with_threads(
-            self.m_cost,
-            self.t_cost,
-            self.lanes,
-            self.threads,
-            self.outlen,
-        )?;
+        let params = Params::builder()
+            .memory(Memory::kib(u64::from(self.m_cost)))
+            .passes(self.t_cost)
+            .lanes(self.lanes)
+            .threads(self.threads)
+            .tag_len(TagLen::bytes(self.outlen as u64))
+            .build()?;
 
         let mut out = vec![0u8; self.outlen];
         match driver {
@@ -604,13 +605,13 @@ fn pooled_result(hasher: &mut Hasher, case: &Case) -> Result<Vec<u8>, Error> {
         case.lanes,
         case.threads,
     )?;
-    let params = Params::new_with_threads(
-        case.m_cost,
-        case.t_cost,
-        case.lanes,
-        case.threads,
-        case.outlen,
-    )?;
+    let params = Params::builder()
+        .memory(Memory::kib(u64::from(case.m_cost)))
+        .passes(case.t_cost)
+        .lanes(case.lanes)
+        .threads(case.threads)
+        .tag_len(TagLen::bytes(case.outlen as u64))
+        .build()?;
 
     let mut out = vec![0u8; case.outlen];
     hasher.set_argon2(Argon2::new(case.algorithm, case.version, params));
@@ -756,7 +757,13 @@ fn compare_with(
     let mut pooled = Argon2::new(
         Algorithm::Argon2id,
         Version::V0x13,
-        Params::new(8, 1, 1, 32).expect("the minimum parameters are valid"),
+        Params::builder()
+            .memory(Memory::kib(8))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .expect("the minimum parameters are valid"),
     )
     .hasher();
     let mut pooled_blocks_high_water = 0usize;

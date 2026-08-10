@@ -1104,8 +1104,11 @@ mod tests {
     }
 
     // Pins the claim in `encoded_len`'s `# Argument order` section: the C's
-    // `argon2_encodedlen` (`argon2.c:447`) takes `t_cost` before `m_cost`, this
-    // port keeps that order, and it is the reverse of `Params::new`.
+    // `argon2_encodedlen` (`argon2.c:447`) takes `t_cost` before `m_cost`, and
+    // this port keeps that order. `ParamsBuilder` has no argument order to
+    // reverse — `.memory()` and `.passes()` are named — so this positional
+    // signature is now the only place in the crate where the two costs can be
+    // transposed at all.
     //
     // A caller who supplies the two costs the other way round gets no error
     // back, and the reason is arithmetic rather than luck. `t_cost` and `m_cost`
@@ -1553,7 +1556,13 @@ mod tests {
 
     #[test]
     fn encode_matches_the_official_vectors() {
-        let params = Params::new(65536, 2, 1, 32).unwrap();
+        let params = Params::builder()
+            .memory(Memory::kib(65536))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         let tag = unb64(b"wWKIMhR9lyDFvRz9YTZweHKfbftvj+qf+YFY4NeBbtA").unwrap();
         let encoded = encode_string_alloc(
             Algorithm::Argon2i,
@@ -1594,7 +1603,13 @@ mod tests {
 
     #[test]
     fn encode_needs_encoded_len_bytes_exactly() {
-        let params = Params::new(65536, 2, 1, 32).unwrap();
+        let params = Params::builder()
+            .memory(Memory::kib(65536))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         let want = encoded_len(Algorithm::Argon2i, 2, 65536, 1, 8, 32);
         assert_eq!(want, V13_ARGON2I.len() + 1);
 
@@ -1627,7 +1642,13 @@ mod tests {
 
     #[test]
     fn encode_validates_first() {
-        let params = Params::new(65536, 2, 1, 32).unwrap();
+        let params = Params::builder()
+            .memory(Memory::kib(65536))
+            .passes(2)
+            .lanes(1)
+            .tag_len(TagLen::bytes(32))
+            .build()
+            .unwrap();
         // Short salt: validate_inputs runs before anything is written.
         assert_eq!(
             encode_string_alloc(
@@ -1694,7 +1715,13 @@ mod tests {
         for algorithm in Algorithm::ALL {
             for version in Version::ALL {
                 for lanes in [1u32, 2, 255] {
-                    let params = Params::new(1 << 16, 3, lanes, tag.len()).unwrap();
+                    let params = Params::builder()
+                        .memory(Memory::kib(1 << 16))
+                        .passes(3)
+                        .lanes(lanes)
+                        .tag_len(TagLen::bytes(tag.len() as u64))
+                        .build()
+                        .unwrap();
                     let encoded =
                         encode_string_alloc(algorithm, version, &params, salt, &tag).unwrap();
                     let d = decode_string(&encoded, algorithm).unwrap();
@@ -1931,7 +1958,13 @@ mod tests {
     fn decode_accepts_a_long_salt_and_tag() {
         let salt: Vec<u8> = (0u8..=255).collect();
         let tag: Vec<u8> = (0u8..=200).rev().collect();
-        let params = Params::new(1 << 16, 1, 1, tag.len()).unwrap();
+        let params = Params::builder()
+            .memory(Memory::kib(1 << 16))
+            .passes(1)
+            .lanes(1)
+            .tag_len(TagLen::bytes(tag.len() as u64))
+            .build()
+            .unwrap();
         let encoded =
             encode_string_alloc(Algorithm::Argon2d, Version::V0x13, &params, &salt, &tag).unwrap();
         let d = decode_string(&encoded, Algorithm::Argon2d).unwrap();
