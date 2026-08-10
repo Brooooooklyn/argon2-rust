@@ -1436,19 +1436,24 @@ mod tests {
     /// missing guard report the *wrong error* instead of no error.
     ///
     /// `Memory` holds a `u64` and `validate_inputs` takes a `u32`, so `build()`
-    /// must range-check before it narrows. 8 GiB is chosen for exactly one
+    /// must range-check before it narrows. 8 TiB is chosen for exactly one
     /// reason: `(1u64 << 33) as u32` is **0**, and 0 is below `MIN_MEMORY`, so a
     /// guard that ran after the narrowing would answer `MemoryTooLittle` for an
-    /// over-large request. Both codes are reachable from a crafted PHC string,
-    /// where `m=` is attacker-chosen, so this is an error-code parity bug with
-    /// the C and not merely a cosmetic one.
+    /// over-large request.
+    ///
+    /// What this protects is a direct builder input, not the PHC decoder:
+    /// `decode_string` parses `m=` with `decimal_u32`, so no string can hand
+    /// `build()` a memory value wider than `u32::MAX` KiB. A caller can, because
+    /// `Memory::kib` takes a `u64` and `Memory::mib`/`Memory::gib` saturate into
+    /// one — and answering `MemoryTooLittle` to a request for 8 TiB would be
+    /// actively misleading.
     ///
     /// This is a different failure mode from the neighbours above, which is why
     /// it earns its own case rather than folding into them: `gib(9999)` and
     /// `gib(u64::MAX)` narrow to values *inside* the legal range on a 64-bit
-    /// target, so a missing guard makes those two return `Ok`. Do not
-    /// "simplify" this to `gib(8)` — that spelling is the same number but stops
-    /// documenting why the number matters.
+    /// target, so a missing guard makes those two return `Ok`. `Memory::gib(8192)`
+    /// is the same number if you prefer that spelling, but `kib(1u64 << 33)` is
+    /// the one that shows the low 32 bits are zero, which is the whole point.
     #[test]
     fn memory_is_range_checked_before_it_is_narrowed() {
         assert_eq!(
