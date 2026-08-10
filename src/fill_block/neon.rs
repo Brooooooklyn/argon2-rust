@@ -313,10 +313,15 @@
 //!
 //! `p4` means `lanes = threads = 4`, i.e. genuinely four threads.
 //!
-//! Cross-checked by `tests::neon_is_faster_than_scalar`, which interleaves the
-//! two backends best-of-5 within one process rather than relying on criterion's
-//! ordering: `m1024 t3 p1` x1.63 (0.77 → 0.47 ms) and `m65536 t3 p1` x1.46
-//! (65.08 → 44.65 ms). The two methods agree.
+//! Cross-checked by `tests::neon_matches_scalar_on_large_arenas`, which
+//! interleaves the two backends best-of-5 within one process rather than
+//! relying on criterion's ordering: `m1024 t3 p1` x1.63 (0.77 → 0.47 ms) and
+//! `m65536 t3 p1` x1.46 (65.08 → 44.65 ms). The two methods agree.
+//!
+//! That test prints those ratios but does not fail on them — a shared CI runner
+//! can hand one candidate a contention window the other never sees. It asserts
+//! that the two backends produce the same tag; regressions in the numbers are
+//! CodSpeed's job.
 //!
 //! The C reference is `phc-winner-argon2` built from `src/ref.c` at `-O3`; the C
 //! has **no** SIMD path on `aarch64` (`src/opt.c` is x86-only), so it lands
@@ -2163,8 +2168,13 @@ mod tests {
     /// platform one. It holds on Apple Silicon, where these margins were
     /// measured. On Neoverse N1 (GitHub's `ubuntu-24.04-arm` runners) the
     /// current NEON schedule is *slower* than scalar (measured: 467 vs 331
-    /// ns/block), so the assertion is skipped there and the uarch-aware
-    /// choice belongs to `detect()` — see the note in `fill_block::mod`.
+    /// ns/block), and the uarch-aware choice belongs to `detect()` — see the
+    /// note in `fill_block::mod`.
+    ///
+    /// This gates what `detection_selects_neon_on_this_host` may expect of
+    /// `detect()`, and nothing else. No test asserts a wall clock; on Apple the
+    /// shootout is compiled out entirely, so `detect()` is a constant there and
+    /// the expectation is exact rather than a measurement.
     const NEON_BEATS_SCALAR_PREMISE: bool =
         cfg!(all(target_vendor = "apple", target_arch = "aarch64"));
 
@@ -2494,7 +2504,8 @@ mod tests {
         // preferred one of them. Spelled as a set rather than as four separate
         // asserts so that a new backend cannot be added without revisiting this.
         let available: alloc::vec::Vec<Backend> = Backend::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|b| b.is_available())
             .collect();
         assert_eq!(available, alloc::vec![Backend::Scalar, Backend::Neon]);
@@ -3021,12 +3032,29 @@ mod tests {
     // Timing. Optimised builds only; a debug build measures the inliner, not
     // the code.
     //
-    // The ASSERTIONS in these two tests are ratios, and both candidates are
-    // sampled interleaved, so they survive a loaded machine. The PRINTED
-    // absolute milliseconds do not: `cargo test` runs tests in parallel, so
-    // these two contend with each other unless you pass `--test-threads=1`, and
-    // a contended run reads ~50 % high on every column at once. Quote the
-    // numbers only from a run that had the machine to itself.
+    // NOTHING HERE ASSERTS A WALL CLOCK. These two tests measure and print, and
+    // then assert an *equivalence* — that the variants they just timed compute
+    // identical results. A throughput comparison is only meaningful if the
+    // candidates agree, so that is the invariant worth failing on, and it is
+    // the same verdict on an idle laptop and a contended CI runner.
+    //
+    // A ratio assertion used to live here, and it was flaky by construction: a
+    // shared runner can hand one candidate a contention window that the others
+    // never see. It failed on `macos-latest` reading neon/scalar x0.92 against
+    // a documented x1.54 — a 40 % swing with no code change, on a commit whose
+    // own PR run had passed. Interleaving narrows that window but cannot close
+    // it, because the noise is another tenant's workload, not measurement
+    // technique.
+    //
+    // Performance regressions are CodSpeed's job (`.github/workflows/
+    // codspeed.yml`, `benches/codspeed.rs`), which compares against the base
+    // commit on consistent hardware instead of guessing from one sample.
+    //
+    // The PRINTED numbers still need a quiet machine: `cargo test` runs tests
+    // in parallel, so these two contend with each other unless you pass
+    // `--test-threads=1`, and a contended run reads ~50 % high on every column
+    // at once. Quote the numbers only from a run that had the machine to
+    // itself.
     // ------------------------------------------------------------------
 
     /// Best-of-`reps` wall time, in seconds, of `f`.
@@ -3104,59 +3132,86 @@ mod tests {
             ns
         };
 
-        std::eprintln!("fill_block, L1-resident, best of 3 x {ITERS} calls:");
+        // Every candidate runs exactly the same chain: `WARMUP` untimed calls
+        // and then `REPS x ITERS` timed ones, all starting from `next`. Equal
+        // call counts are what make the three final blocks comparable, which is
+        // what this test asserts on.
+        const WARMUP: usize = ITERS / 10;
+        const REPS: usize = 3;
+        const CHAIN: usize = WARMUP + REPS * ITERS;
 
-        let scalar_ns = {
+        std::eprintln!("fill_block, L1-resident, best of {REPS} x {ITERS} calls:");
+
+        let (scalar_ns, scalar_out) = {
             let mut n = next;
-            for _ in 0..ITERS / 10 {
+            for _ in 0..WARMUP {
                 scalar::fill_block(&prev, &reference, &mut n, true);
             }
-            let s = best_of(3, || {
+            let s = best_of(REPS, || {
                 for _ in 0..ITERS {
                     scalar::fill_block(&prev, &reference, &mut n, true);
                 }
             });
-            core::hint::black_box(&n);
-            report("scalar", s)
+            (report("scalar", s), n)
         };
 
-        let neon_ns = {
+        let (neon_ns, neon_out) = {
             let mut n = next;
             // SAFETY: aarch64-only module.
-            let s = best_of(3, || unsafe {
+            unsafe {
+                for _ in 0..WARMUP {
+                    fill_block_isolated(&prev, &reference, &mut n, true);
+                }
+            }
+            // SAFETY: aarch64-only module.
+            let s = best_of(REPS, || unsafe {
                 for _ in 0..ITERS {
                     fill_block_isolated(&prev, &reference, &mut n, true);
                 }
             });
-            core::hint::black_box(&n);
-            report("neon (SHL+SRI)", s)
+            (report("neon (SHL+SRI)", s), n)
         };
 
-        let neon_tbl_ns = {
+        let (neon_tbl_ns, neon_tbl_out) = {
             let mut n = next;
             // SAFETY: aarch64-only module.
-            let s = best_of(3, || unsafe {
+            unsafe {
+                for _ in 0..WARMUP {
+                    fill_block_isolated_tbl_rotates(&prev, &reference, &mut n, true);
+                }
+            }
+            // SAFETY: aarch64-only module.
+            let s = best_of(REPS, || unsafe {
                 for _ in 0..ITERS {
                     fill_block_isolated_tbl_rotates(&prev, &reference, &mut n, true);
                 }
             });
-            core::hint::black_box(&n);
-            report("neon (TBL)", s)
+            (report("neon (TBL)", s), n)
         };
 
         std::eprintln!(
-            "  -> neon/scalar x{:.2}, TBL/SHL+SRI x{:.3}",
+            "  -> neon/scalar x{:.2}, TBL/SHL+SRI x{:.3}  (informational; \
+             regressions are CodSpeed's job)",
             scalar_ns / neon_ns,
             neon_tbl_ns / neon_ns
         );
 
-        if NEON_BEATS_SCALAR_PREMISE {
-            assert!(
-                neon_ns < scalar_ns,
-                "NEON fill_block ({neon_ns:.2} ns) is not faster than scalar ({scalar_ns:.2} ns)"
+        // The verdict, and the reason this test still earns its runtime now
+        // that it asserts no wall clock: `with_xor = true` feeds each result
+        // into the next call, so the blocks just compared are the tail of a
+        // chain `CHAIN` calls deep. A divergence in any single call propagates
+        // to the end. `fill_block_matches_scalar_over_random_triples` checks
+        // the same three variants one call at a time, over random inputs; this
+        // checks them composed, which is how `fill_segment` actually uses them.
+        for i in 0..QWORDS_IN_BLOCK {
+            assert_eq!(
+                neon_out.0[i], scalar_out.0[i],
+                "NEON diverged from scalar at word {i} after a {CHAIN}-call chain"
             );
-        } else {
-            std::eprintln!("  -> NEON-vs-scalar assertion skipped: premise not measured on this microarchitecture");
+            assert_eq!(
+                neon_tbl_out.0[i], scalar_out.0[i],
+                "NEON (TBL) diverged from scalar at word {i} after a {CHAIN}-call chain"
+            );
         }
     }
 
@@ -3486,14 +3541,20 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     #[cfg_attr(debug_assertions, ignore = "meaningless without optimisations")]
-    fn neon_is_faster_than_scalar() {
-        // The headline number the task asks for, plus a cache-resident control
-        // that separates compression cost from arena latency: at m_cost = 65536
-        // the reference block is a random 1 KiB in a 64 MiB working set, so a
-        // large slice of every iteration is a DRAM round trip that no backend
-        // can avoid. At m_cost = 1024 the whole arena fits in L2.
-        let mut speedup_at_64mib = 0.0;
-
+    fn neon_matches_scalar_on_large_arenas() {
+        // The headline number, plus a cache-resident control that separates
+        // compression cost from arena latency: at m_cost = 65536 the reference
+        // block is a random 1 KiB in a 64 MiB working set, so a large slice of
+        // every iteration is a DRAM round trip that no backend can avoid. At
+        // m_cost = 1024 the whole arena fits in L2.
+        //
+        // The speedup is printed, not asserted. What is asserted is that the
+        // two backends agree, and these are the only sizes where that is
+        // checked: `whole_hash_matches_scalar_across_the_parameter_matrix`
+        // sweeps algorithms, versions, lanes and passes but tops out near
+        // 3 MiB, so nothing else exercises NEON against scalar in the regime
+        // where the arena outgrows cache and `index_alpha` reaches across a
+        // working set that no prefetcher can cover.
         for (label, m_cost) in [
             ("m=1024 (1 MiB, L2)", 1024u32),
             ("m=65536 (64 MiB)", 1 << 16),
@@ -3502,24 +3563,33 @@ mod tests {
             let blocks = f64::from(m_cost) * 3.0;
 
             let once = |backend: Backend| {
-                let out = hash(
+                hash(
                     backend,
                     Algorithm::Argon2id,
                     Version::V0x13,
                     &params,
                     b"somesalt",
-                );
-                // Keep the result observable so nothing is optimised away.
-                core::hint::black_box(out);
+                )
             };
 
-            // Warm the allocator and the page cache for both.
-            once(Backend::Scalar);
-            once(Backend::Neon);
+            // Warms the allocator and the page cache for both — and the two
+            // tags it produces are what this test asserts on.
+            let scalar_tag = once(Backend::Scalar);
+            let neon_tag = once(Backend::Neon);
+            assert_eq!(
+                neon_tag, scalar_tag,
+                "{label}: NEON tag differs from scalar"
+            );
+
+            // Keep the results observable so nothing is optimised away.
+            let once = |backend: Backend| {
+                core::hint::black_box(once(backend));
+            };
 
             // Interleaved, so a DVFS or thermal step cannot land on one
-            // candidate only. Five reps rather than three: the whole point of
-            // this test is that it must not go flaky under load.
+            // candidate only. Nothing below fails on these numbers, but a
+            // printed ratio that misattributes a contention window is worse
+            // than no ratio at all — someone will quote it.
             let (scalar_s, neon_s) =
                 best_of_interleaved(5, || once(Backend::Scalar), || once(Backend::Neon));
 
@@ -3536,24 +3606,6 @@ mod tests {
                 blocks * 1024.0 / neon_s / (1024.0 * 1024.0 * 1024.0),
                 scalar_s / neon_s,
             );
-
-            if NEON_BEATS_SCALAR_PREMISE {
-                assert!(
-                    neon_s < scalar_s,
-                    "{label}: NEON ({:.2} ms) is not faster than scalar ({:.2} ms)",
-                    neon_s * 1e3,
-                    scalar_s * 1e3
-                );
-            } else {
-                std::eprintln!(
-                    "  -> NEON-vs-scalar assertion skipped: premise not measured on this microarchitecture"
-                );
-            }
-            speedup_at_64mib = scalar_s / neon_s;
-        }
-
-        if NEON_BEATS_SCALAR_PREMISE {
-            assert!(speedup_at_64mib > 1.0);
         }
     }
 }
