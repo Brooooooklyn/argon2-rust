@@ -7,9 +7,11 @@
 //!
 //! Keep this suite deliberately small. CodSpeed runs it on every pull request,
 //! and each benchmark id becomes part of the long-term performance history.
-//! Internal kernels, dispatch, encoding primitives, and BLAKE2b are therefore
-//! measured through the public methods that use them instead of receiving
-//! separate implementation-specific benchmarks.
+//! Internal kernels, dispatch, and BLAKE2b are therefore measured through the
+//! public methods that use them instead of receiving separate
+//! implementation-specific benchmarks. PHC parsing and serialization are the
+//! exception: the public methods also run Argon2, whose memory fill hides codec
+//! regressions, so the production PHC codec is isolated as a whole below.
 //!
 //! Every configuration uses one worker thread. CodSpeed's CPU simulation does
 //! not model wall-clock parallel speedup, and this crate's multi-threaded fill
@@ -19,6 +21,7 @@
 
 use std::time::Duration;
 
+use argon2_rust::__internal::{decode_string, encode_string_alloc};
 use argon2_rust::{Algorithm, Argon2, Params, Version};
 use codspeed_criterion_compat::{
     BenchmarkId, Criterion, black_box, criterion_group, criterion_main,
@@ -29,6 +32,10 @@ const SALT: &[u8] = b"codspeed-salt-16";
 const SECRET: &[u8] = b"server-side pepper";
 const AD: &[u8] = b"argon2-rust benchmark";
 const OUT_LEN: usize = 32;
+const TAG: [u8; OUT_LEN] = [
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+];
 
 fn params(m_cost: u32) -> Params {
     Params::new_with_threads(m_cost, 1, 1, 1, OUT_LEN).expect("benchmark parameters must be valid")
@@ -63,6 +70,45 @@ fn bench_algorithms(c: &mut Criterion) {
             });
         });
     }
+
+    group.finish();
+}
+
+/// The PHC codec behind the public encoded/password APIs, without an Argon2
+/// fill masking its cost. This is one realistic record: the crate defaults, a
+/// 16-byte salt, and a 32-byte tag. Direct Base64 throughput remains covered by
+/// `benches/base64.rs`; these cases measure the complete production format.
+fn bench_phc_codec(c: &mut Criterion) {
+    let mut group = c.benchmark_group("public/phc_codec");
+    let p = Params::default();
+    let encoded = encode_string_alloc(Algorithm::Argon2id, Version::V0x13, &p, SALT, &TAG)
+        .expect("PHC string");
+
+    // Resolve runtime dispatch for both directions before measurement.
+    decode_string(&encoded, Algorithm::Argon2id).expect("PHC parse warm-up");
+
+    group.bench_function("serialize", |b| {
+        b.iter(|| {
+            black_box(
+                encode_string_alloc(
+                    Algorithm::Argon2id,
+                    Version::V0x13,
+                    black_box(&p),
+                    black_box(SALT),
+                    black_box(&TAG),
+                )
+                .expect("PHC serialization"),
+            );
+        });
+    });
+
+    group.bench_function("parse", |b| {
+        b.iter(|| {
+            black_box(
+                decode_string(black_box(&encoded), Algorithm::Argon2id).expect("PHC parsing"),
+            );
+        });
+    });
 
     group.finish();
 }
@@ -234,6 +280,6 @@ criterion_group! {
         .sample_size(10)
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(2));
-    targets = bench_algorithms, bench_one_shot, bench_pooled
+    targets = bench_algorithms, bench_phc_codec, bench_one_shot, bench_pooled
 }
 criterion_main!(benches);
