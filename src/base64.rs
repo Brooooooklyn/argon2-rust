@@ -215,7 +215,8 @@ pub const MIN_ENCODE_LEN: usize = 24;
 /// See the AArch64 definition.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub const MIN_ENCODE_LEN: usize = 16;
-/// WebAssembly SIMD128 uses the same 12-byte kernel width as SSSE3.
+/// WebAssembly SIMD128 consumes 12 bytes from each 16-byte vector load, as
+/// SSSE3 does, so the shortest safely readable input is 16 bytes.
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 pub const MIN_ENCODE_LEN: usize = 16;
 /// No SIMD encoder is compiled on this target.

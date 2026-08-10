@@ -375,6 +375,8 @@ pub unsafe fn decode_avx2(
     while src_len - consumed >= 32 && dst_len - written >= 24 {
         // SAFETY: the loop proves both pointer ranges; the attribute proves AVX2.
         if !unsafe { decode_block_32(dst.add(written), src.add(consumed)) } {
+            // Leave the whole rejected vector for the scalar tail. Retrying its
+            // first half with SSSE3 would only optimize malformed input.
             return (consumed, written);
         }
         consumed += 32;
