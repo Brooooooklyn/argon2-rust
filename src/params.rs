@@ -671,12 +671,18 @@ impl ParamsBuilder {
         // narrowing: on a 32-bit target `(1u64 << 40) as usize` is 0, which
         // would turn OutputTooLong into OutputTooShort.
         //
-        // The order here is the C's: `validate_inputs` checks `out_len`
-        // before `m_cost`, so a caller who gets both wrong sees the same
-        // error the C would report.
+        // The order here is the C's. `validate_inputs` checks BOTH `out_len`
+        // bounds before it looks at `m_cost`, so both are checked here too —
+        // pre-checking only the upper bound would report MemoryTooMuch for a
+        // 3-byte tag combined with an over-large memory cost, where the C
+        // reports OutputTooShort. That combination is reachable from a crafted
+        // PHC string, whose tag length and `m=` are both attacker-chosen.
         let bytes = self.tag_len.as_bytes();
         if bytes > MAX_OUTLEN as u64 {
             return Err(Error::OutputTooLong);
+        }
+        if bytes < MIN_OUTLEN as u64 {
+            return Err(Error::OutputTooShort);
         }
         let kib = self.memory.as_kib();
         if kib > MAX_MEMORY as u64 {
@@ -1414,16 +1420,28 @@ mod tests {
         assert_eq!(b.threads(0).build(), Err(Error::ThreadsTooFew));
     }
 
-    /// `validate_inputs` checks `out_len` before `m_cost` (params.rs:381 vs :413).
-    /// `build()`'s own pre-narrowing checks must keep that order, so a caller who
-    /// gets both wrong sees the error the C would have reported.
+    /// `validate_inputs` checks BOTH `out_len` bounds before `m_cost`
+    /// (params.rs:470-476 vs :502). `build()`'s own pre-narrowing checks must
+    /// keep that order, so a caller who gets both wrong sees the error the C
+    /// would have reported. Both directions are pinned: checking only the upper
+    /// bound first is the bug this test exists to catch.
     #[test]
     fn tag_len_is_checked_before_memory_like_the_c() {
-        let both_bad = Params::builder()
+        let too_long = Params::builder()
             .memory(Memory::gib(9999))
             .tag_len(TagLen::bytes(1 << 40))
             .build();
-        assert_eq!(both_bad, Err(Error::OutputTooLong));
+        assert_eq!(too_long, Err(Error::OutputTooLong));
+
+        // The case that a two-check implementation gets wrong: the tag is too
+        // SHORT, so only `validate_inputs` would catch it — but the memory
+        // pre-check would already have returned MemoryTooMuch. Reachable from a
+        // crafted PHC string with a 3-byte tag and a large `m=`.
+        let too_short = Params::builder()
+            .memory(Memory::kib(MAX_MEMORY as u64 + 1))
+            .tag_len(TagLen::bytes(3))
+            .build();
+        assert_eq!(too_short, Err(Error::OutputTooShort));
     }
 
     /// A saturated `Memory` must be rejected, not truncated into a legal `u32`.
