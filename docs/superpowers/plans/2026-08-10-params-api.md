@@ -941,6 +941,21 @@ Expected: PASS, all 31 migrated examples.
 Run: `grep -rn 'Params::new\|DEFAULT_M_COST\|DEFAULT_T_COST\|DEFAULT_LANES\|DEFAULT_OUTPUT_LEN' src tests benches README.md`
 Expected: no output.
 
+- [ ] **Step 7a: Sweep stale line-number citations**
+
+This branch grows `src/params.rs` by roughly 550 lines and renames items across
+five files, so every `params.rs:NNN`-style citation written earlier in the branch
+has drifted. Two are known: the comment inside `build()` and the doc comment on
+`tag_len_is_checked_before_memory_like_the_c`, both citing `validate_inputs`'
+`out_len` and `m_cost` checks.
+
+Find them all with `grep -rn 'params\.rs:[0-9]' src`, then for each one either
+repoint it at the correct current line or, preferably, replace the number with the
+thing it identifies — `validate_inputs`' "Validate output length" and "Validate
+memory cost" comments are stable where line numbers are not. A citation that
+points at unrelated code is worse than no citation in a module whose whole claim
+is a checkable correspondence with the C.
+
 - [ ] **Step 8: Check the feature matrix and a 32-bit target**
 
 Run:
