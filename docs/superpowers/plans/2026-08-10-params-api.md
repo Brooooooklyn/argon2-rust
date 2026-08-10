@@ -359,16 +359,28 @@ fn build_rejects_every_out_of_range_value() {
     assert_eq!(b.threads(0).build(), Err(Error::ThreadsTooFew));
 }
 
-/// `validate_inputs` checks `out_len` before `m_cost` (params.rs:381 vs :413).
-/// `build()`'s own pre-narrowing checks must keep that order, so a caller who
-/// gets both wrong sees the error the C would have reported.
+/// `validate_inputs` checks BOTH `out_len` bounds before `m_cost`
+/// (params.rs:381-386 vs :413). `build()`'s own pre-narrowing checks must keep
+/// that order, so a caller who gets both wrong sees the error the C would have
+/// reported. Both directions are pinned: checking only the upper bound first is
+/// the bug this test exists to catch.
 #[test]
 fn tag_len_is_checked_before_memory_like_the_c() {
-    let both_bad = Params::builder()
+    let too_long = Params::builder()
         .memory(Memory::gib(9999))
         .tag_len(TagLen::bytes(1 << 40))
         .build();
-    assert_eq!(both_bad, Err(Error::OutputTooLong));
+    assert_eq!(too_long, Err(Error::OutputTooLong));
+
+    // The case that a two-check implementation gets wrong: the tag is too
+    // SHORT, so only `validate_inputs` would catch it — but the memory
+    // pre-check would already have returned MemoryTooMuch. Reachable from a
+    // crafted PHC string with a 3-byte tag and a large `m=`.
+    let too_short = Params::builder()
+        .memory(Memory::kib(MAX_MEMORY as u64 + 1))
+        .tag_len(TagLen::bytes(3))
+        .build();
+    assert_eq!(too_short, Err(Error::OutputTooShort));
 }
 
 /// A saturated `Memory` must be rejected, not truncated into a legal `u32`.
@@ -495,12 +507,18 @@ impl ParamsBuilder {
         // narrowing: on a 32-bit target `(1u64 << 40) as usize` is 0, which
         // would turn OutputTooLong into OutputTooShort.
         //
-        // The order here is the C's: `validate_inputs` checks `out_len`
-        // before `m_cost`, so a caller who gets both wrong sees the same
-        // error the C would report.
+        // The order here is the C's. `validate_inputs` checks BOTH `out_len`
+        // bounds before it looks at `m_cost`, so both are checked here too —
+        // pre-checking only the upper bound would report MemoryTooMuch for a
+        // 3-byte tag combined with an over-large memory cost, where the C
+        // reports OutputTooShort. That combination is reachable from a crafted
+        // PHC string, whose tag length and `m=` are both attacker-chosen.
         let bytes = self.tag_len.as_bytes();
         if bytes > MAX_OUTLEN as u64 {
             return Err(Error::OutputTooLong);
+        }
+        if bytes < MIN_OUTLEN as u64 {
+            return Err(Error::OutputTooShort);
         }
         let kib = self.memory.as_kib();
         if kib > MAX_MEMORY as u64 {
@@ -954,4 +972,6 @@ git commit -m "feat(params)!: replace the positional constructors with the build
 
 **Type consistency.** `memory_kib()` returns `u32` and `tag_len_bytes()` returns `usize` in every task that uses them. `Memory::as_kib()` and `TagLen::as_bytes()` return `u64` throughout. `threads` is `Option<u32>` in the builder and `u32` in `Params`, resolved only in `build()`.
 
-**Ordering risk, flagged for the implementer.** `build()` checks `tag_len` before `memory`. Task 2's `tag_len_is_checked_before_memory_like_the_c` test is what pins it; do not reorder those two blocks to read more naturally.
+**Ordering risk, flagged for the implementer.** `build()` checks *both* `tag_len` bounds before `memory`. Task 2's `tag_len_is_checked_before_memory_like_the_c` test pins both directions; do not reorder those blocks to read more naturally, and do not drop the lower-bound pre-check.
+
+**Corrected after Task 2's review.** The first version of this plan pre-checked only the upper tag bound before memory, and its test covered only the too-long case. Codex caught that `TagLen::bytes(3)` with an over-large memory cost then returns `MemoryTooMuch` where the C returns `OutputTooShort` — reachable from a crafted PHC string, since a decoded tag length and `m=` are both attacker-chosen. Verified empirically before the plan was changed, not argued from the code alone.
