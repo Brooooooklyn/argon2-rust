@@ -80,6 +80,16 @@
 //! feature turned on. Without `std`, backend selection falls back to
 //! compile-time `target_feature` cfgs.
 //!
+//! # Not a `password-hash` provider
+//!
+//! This is a port of the C reference, not an implementation of the RustCrypto
+//! `password-hash` traits: there is no `PasswordHasher` or `PasswordVerifier`
+//! here, and no dependency that would supply one. [`Params`] carries no `serde`
+//! impls either, though its full state round-trips through the accessors and
+//! [`Params::new_with_threads`]. Interoperation is at the string level — the PHC
+//! strings this crate reads and writes are the ones the `argon2` crate reads and
+//! writes.
+//!
 //! # Reusing memory across hashes
 //!
 //! Each [`Argon2`] hash acquires its block arena once and releases it on the
