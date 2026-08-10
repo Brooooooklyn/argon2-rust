@@ -1,6 +1,6 @@
 [package]
 name = "argon2-rust"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 # Set by ONE thing: `stdarch_x86_avx512` (AVX-512 intrinsics + the `avx512f`
 # target feature) stabilized in 1.89. Nothing else here needs newer than 1.88.
@@ -12,7 +12,7 @@ license = "MIT"
 repository = "https://github.com/Brooooooklyn/argon2-rust"
 homepage = "https://github.com/Brooooooklyn/argon2-rust"
 readme = "README.md"
-exclude = ["/.github", "/benches", "/tests", "/fuzz", "/vm.sh"]
+exclude = ["/.github", "/benches", "/tests", "/fuzz", "/vm.sh", "/renovate.json"]
 keywords = ["argon2", "password-hash", "kdf", "simd", "crypto"]
 categories = ["cryptography", "no-std"]
 # Every bench target is declared explicitly below. Without this, Cargo would

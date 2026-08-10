@@ -274,7 +274,7 @@ comparison.
 
 ```toml
 [dependencies]
-argon2-rust = "0.1"
+argon2-rust = "0.0.1"
 ```
 
 ```rust
