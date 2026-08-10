@@ -854,7 +854,7 @@ cargo build --release --benches
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ```
-Expected: all PASS, 357 tests. The two doc commands are the `ci.yml:96-108` gate.
+Expected: all PASS, 369 tests. The two doc commands are the `ci.yml:96-108` gate.
 Step 2a below is what keeps them clean.
 
 `--benches` matters here: `benches/argon2.rs` and
@@ -896,6 +896,16 @@ What remains is every `Params::new(` and `Params::new_with_threads(` call site.
 
 Remove from `impl Params` in `src/params.rs`: `pub const fn new`, `pub const fn new_with_threads`, and the four `DEFAULT_*` constants. `Params::DEFAULT` replaces all four.
 
+**Before you start, one CI trap found during Task 3.** The two docs commands are
+not equivalent, and only one of them catches a whole class of error. An intra-doc
+link to an item that is public *only* behind a feature — for example
+`decode_string`, which is `#[doc(hidden)]` behind `internal-api` — makes
+`cargo doc --no-deps` fail with `rustdoc::private_intra_doc_links` while
+`cargo doc --no-deps --all-features` **passes**. This task repoints
+`Params::new` links across the crate, so it is exposed to exactly that asymmetry.
+Run the default-features leg too, and never treat the `--all-features` leg alone
+as proof.
+
 - [ ] **Step 2: Let the compiler enumerate the breakage**
 
 Run: `cargo build --all-targets 2>&1 | grep -c '^error'`
@@ -929,7 +939,7 @@ Three rules keep the diff honest:
 - [ ] **Step 5: Run the suite, including the README test**
 
 Run: `cargo test --release --locked`
-Expected: PASS, 350 tests. `tests/readme.rs` re-extracts every ```rust block from `README.md` and asserts each line appears in its transcription, so a README block you changed without changing that file fails here.
+Expected: PASS, 369 tests — measure the count on the commit you start from rather than trusting this number, since earlier tasks moved it from 350 to 357 to 369. `tests/readme.rs` re-extracts every ```rust block from `README.md` and asserts each line appears in its transcription, so a README block you changed without changing that file fails here.
 
 - [ ] **Step 6: Run the doctests**
 
