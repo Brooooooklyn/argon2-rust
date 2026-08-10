@@ -714,15 +714,20 @@ git commit -m "feat(params): add a const ParamsBuilder, presets and typed access
 
 **Files:**
 - Modify: `src/params.rs` — delete the old accessors `m_cost()`, `t_cost()`, `output_len()`
-- Modify: `src/core.rs`, `src/encoding.rs`, `src/block.rs`, `src/fill_block/sse2.rs` — accessor renames
+- Modify: `src/core.rs`, `src/encoding.rs`, `src/block.rs`, `src/fill_block/sse2.rs`, `src/params.rs` — accessor renames
+- Modify: `tests/vectors.rs`, `tests/reuse.rs`, `benches/argon2.rs`, `benches/micro.rs` — accessor renames. These call the accessors this task deletes, so they must move in this task, not Task 4. Otherwise Step 5 cannot compile the test and bench targets.
 - Modify: `src/encoding.rs:949` — the PHC decoder builds through `ParamsBuilder`
 - Modify: `src/encoding.rs` around `:246-:293` — three doc comments describe `Params::new`'s argument order
+
+This task renames accessor *calls* everywhere. It does not touch `Params::new`
+or `Params::new_with_threads`, which still exist and still compile — Task 4
+deletes those and migrates their call sites.
 
 **Interfaces:**
 - Consumes: everything Task 2 produced
 - Produces: `Params` with only the new accessors. `lanes()`, `threads()`, `effective_threads()`, `memory_layout()`, `memory_blocks()`, `segment_length()`, `lane_length()` and `validate_for()` are unchanged and keep their names.
 
-- [ ] **Step 1: Rename the accessor calls across src/**
+- [ ] **Step 1: Rename the accessor calls everywhere**
 
 The mapping is exact and total:
 
@@ -732,16 +737,21 @@ The mapping is exact and total:
 | `.t_cost()` | `.passes()` |
 | `.output_len()` | `.tag_len_bytes()` |
 
-Apply it to the five files that call them:
+Apply it to all nine files that call them:
 
 ```bash
 sed -i '' 's/\.m_cost()/.memory_kib()/g; s/\.t_cost()/.passes()/g; s/\.output_len()/.tag_len_bytes()/g' \
-  src/core.rs src/encoding.rs src/block.rs src/fill_block/sse2.rs src/params.rs
+  src/core.rs src/encoding.rs src/block.rs src/fill_block/sse2.rs src/params.rs \
+  tests/vectors.rs tests/reuse.rs benches/argon2.rs benches/micro.rs
 ```
 
 `src/params.rs` is in that list for exactly one line: the doc example at
 `src/params.rs:357` asserts `params.output_len() == 32`. A doctest is a caller
 like any other, and `cargo test --doc` catches it if you miss it.
+
+The four files under `tests/` and `benches/` are in the list because Step 2
+deletes the accessors they call. Leaving them for Task 4 would make this task's
+own `cargo test` step fail to compile.
 
 The struct's private **fields** keep their names — `m_cost`, `t_cost`,
 `output_len` — because they mirror `argon2_context`. Only method *calls* change,
@@ -780,21 +790,28 @@ Add `Memory` and `TagLen` to the file's `use crate::params::{…}` import list.
 
 `src/encoding.rs` explains, around lines 246-251, 267-268 and 293, that the PHC string's field order is the reverse of `Params::new`'s arguments. That warning exists because the old signature was positional. Rewrite each so it describes the builder: the point to preserve is that a PHC string carries `m`, then `t`, then `p`, and that the decoder must not transpose them. Delete the "reversed against `Params::new`" framing — with named setters there is no argument order to reverse — and update the two runnable examples at `:268` and `:293` to the builder spelling.
 
-- [ ] **Step 5: Build and run the whole suite**
+- [ ] **Step 5: Build and run the whole suite, including benches**
 
-Run: `cargo test --release --locked`
-Expected: PASS, 350 tests. Any missed call site is a compile error naming the file and line.
+Run:
+```bash
+cargo test --release --locked
+cargo build --release --benches
+```
+Expected: both PASS, 350 tests. `--benches` matters here: `benches/argon2.rs` and
+`benches/micro.rs` call the renamed accessors, and a plain `cargo test` does not
+compile bench targets. Any missed call site is a compile error naming the file
+and line.
 
 - [ ] **Step 6: Confirm no accessor call survives**
 
-Run: `grep -rn '\.m_cost()\|\.t_cost()\|\.output_len()' src`
+Run: `grep -rn '\.m_cost()\|\.t_cost()\|\.output_len()' src tests benches README.md`
 Expected: no output.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src
-git commit -m "refactor(params): move the crate's internals onto the typed accessors"
+git add src tests benches
+git commit -m "refactor(params): move every caller onto the typed accessors"
 ```
 
 ---
@@ -806,6 +823,10 @@ git commit -m "refactor(params): move the crate's internals onto the typed acces
 - Modify: all of `src/` — 31 doctests and any remaining internal construction
 - Modify: `tests/` (7 files), `benches/` (6 files)
 - Modify: `README.md`
+
+This task is about **construction** only. Task 3 already renamed every accessor
+call, so nothing here touches `.memory_kib()`, `.passes()` or `.tag_len_bytes()`.
+What remains is every `Params::new(` and `Params::new_with_threads(` call site.
 
 **Interfaces:**
 - Consumes: everything Tasks 1-3 produced
