@@ -16,10 +16,13 @@ C reference, OpenSSL, and the popular Rust crates, on both x86-64 and aarch64.
   the official `test.c` vectors, and a live differential harness comparing tags
   and C error codes over the supported parameter matrix; PHC strings are
   checked against the reference vectors
-- **Runtime CPU dispatch**: AVX-512 → AVX2 → SSE2(+SSSE3) → NEON → scalar,
-  cached in a single atomic; safe code can never reach an instruction set the
-  CPU lacks. On wasm32 a **SIMD128** backend is selected at compile time
-  (`-C target-feature=+simd128`), the only sound choice for a wasm module
+- **Runtime CPU dispatch**: the Argon2 fill selects AVX-512 → AVX2 →
+  SSE2(+SSSE3) → NEON → scalar, while PHC Base64 separately selects AVX2 →
+  SSSE3 → NEON → scalar. Like `base64-simd`, the Base64 cascade deliberately
+  tops out at AVX2, including on AVX-512 CPUs. Each choice is cached in one
+  relaxed atomic; safe code can never reach an instruction set the CPU lacks.
+  On wasm32 both have a **SIMD128** backend selected at compile time (`-C
+  target-feature=+simd128`), the only sound choice for a wasm module
 - **Persistent worker pool** for `lanes > 1` (3 thread spawns per hash instead
   of the C's 48), with a hand-rolled 0.6 µs barrier
 - **OS-native memory**: `mmap` + `MADV_HUGEPAGE` arena on Linux, secure

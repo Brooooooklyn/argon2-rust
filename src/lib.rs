@@ -52,6 +52,13 @@
 //! | `Avx2` | `x86_64` + AVX2 | `src/opt.c` (`__AVX2__`) |
 //! | `Avx512` | `x86_64` + AVX-512F | `src/opt.c` (`__AVX512F__`) |
 //!
+//! The unpadded standard-Base64 codec used by PHC strings has a separate,
+//! cached dispatch: AVX2, SSSE3, AArch64 NEON, wasm SIMD128, then scalar. Its
+//! vector kernels follow `base64-simd`/`aklomp/base64`, while inputs shorter
+//! than one vector stay on the original scalar loop. As in `base64-simd`,
+//! AVX-512-capable CPUs use this codec's AVX2 path; the wider backend remains
+//! specific to the Argon2 compression function above.
+//!
 //! # Features
 //!
 //! * `std` *(default)* — runtime CPU feature detection.
@@ -207,7 +214,7 @@ macro_rules! private_modules {
     };
 }
 
-private_modules!(blake2b, block, core, encoding, fill_block, memory);
+private_modules!(base64, blake2b, block, core, encoding, fill_block, memory);
 
 // OS entropy for the convenience salt API; needs std for the syscall and the
 // /dev/urandom fallback. Declared per-platform inside the module.
@@ -268,6 +275,7 @@ pub fn detected_backend() -> Backend {
 #[cfg(feature = "internal-api")]
 #[doc(hidden)]
 pub mod __internal {
+    pub use crate::base64::{Base64Backend, base64_backend, detect_base64_backend};
     pub use crate::blake2b::{
         BLOCKBYTES, Blake2b, Blake2bBackend, IV, KEYBYTES, OUTBYTES, PERSONALBYTES, SALTBYTES,
         blake2b, blake2b_backend, blake2b_long, blake2b_long_with_backend, blake2b_with_backend,
@@ -281,7 +289,7 @@ pub mod __internal {
     };
     pub use crate::encoding::{
         Decoded, b64_len, decode_string, encode_string, encode_string_alloc, encoded_len,
-        from_base64, num_len, to_base64,
+        from_base64, from_base64_with_backend, num_len, to_base64, to_base64_with_backend,
     };
     pub use crate::fill_block::{Backend, FillSegmentFn, backend, detect, fill_segment_fn};
     /// The arena release-path observation point, for

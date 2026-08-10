@@ -121,6 +121,22 @@ harness = false
 name = "blake2b"
 harness = false
 
+# Isolates the PHC string's unpadded standard-Base64 codec. The production
+# hash sizes are deliberately included alongside larger buffers so a SIMD
+# backend cannot look good only on bulk data it never sees in normal Argon2
+# records.
+[[bench]]
+name = "base64"
+harness = false
+
+# Dependency-free paired scalar/SIMD timing harness. Unlike the Criterion
+# sweep above, this also runs under Wasmtime and inside minimal Linux
+# containers, and reports both the production auto-dispatch path and each
+# executable backend explicitly.
+[[bench]]
+name = "base64_shootout"
+harness = false
+
 # Resident-set-size checks, which are a property of a *process* and therefore
 # cannot live in a libtest binary: `cargo test` runs that binary's tests
 # concurrently in one process, so `ps -o rss=` charges every sibling's

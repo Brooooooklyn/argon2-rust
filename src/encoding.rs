@@ -71,6 +71,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::base64::Base64Backend;
 use crate::error::Error;
 use crate::params::{Algorithm, Params, Version, validate_inputs};
 
@@ -391,6 +392,20 @@ fn encoded_len_usize(
 ///
 /// [`Error::EncodingFail`] if `dst` is too small.
 pub fn to_base64(dst: &mut [u8], src: &[u8]) -> Result<usize, Error> {
+    if src.len() < crate::base64::MIN_ENCODE_LEN {
+        // Keep backend lookup and the generalized prefix state completely out
+        // of tiny salts. This is the original scalar function's exact shape.
+        return to_base64_scalar(dst, src);
+    }
+    let backend = crate::base64::base64_backend();
+    // SAFETY: runtime detection returns only an executable backend.
+    unsafe { to_base64_with_backend(dst, src, backend) }
+}
+
+/// The original reference-C loop, kept whole so short inputs do not pay for or
+/// inhibit optimization around a SIMD prefix they cannot use.
+#[inline(always)]
+fn to_base64_scalar(dst: &mut [u8], src: &[u8]) -> Result<usize, Error> {
     let olen = b64_len_usize(src.len());
     if dst.len() <= olen {
         return Err(Error::EncodingFail);
@@ -399,8 +414,55 @@ pub fn to_base64(dst: &mut [u8], src: &[u8]) -> Result<usize, Error> {
     let mut acc: u32 = 0;
     let mut acc_len: u32 = 0;
     let mut written = 0usize;
-
     for &byte in src {
+        acc = (acc << 8) | byte as u32;
+        acc_len += 8;
+        while acc_len >= 6 {
+            acc_len -= 6;
+            dst[written] = b64_byte_to_char((acc >> acc_len) & 0x3f);
+            written += 1;
+        }
+    }
+    if acc_len > 0 {
+        dst[written] = b64_byte_to_char((acc << (6 - acc_len)) & 0x3f);
+        written += 1;
+    }
+
+    debug_assert_eq!(written, olen);
+    Ok(written)
+}
+
+/// Encode with an explicitly selected Base64 backend.
+///
+/// This is an unstable test/benchmark hook. Normal callers use [`to_base64`],
+/// which performs safe runtime detection.
+///
+/// # Safety
+///
+/// `backend` must be executable on the current CPU, as reported by
+/// [`Base64Backend::is_available`].
+#[inline]
+pub unsafe fn to_base64_with_backend(
+    dst: &mut [u8],
+    src: &[u8],
+    backend: Base64Backend,
+) -> Result<usize, Error> {
+    if backend == Base64Backend::Scalar {
+        return to_base64_scalar(dst, src);
+    }
+
+    let olen = b64_len_usize(src.len());
+    if dst.len() <= olen {
+        return Err(Error::EncodingFail);
+    }
+
+    // SAFETY: transferred from this function's caller. The capacity check
+    // above proves every complete vector store is within `dst`.
+    let (consumed, mut written) = unsafe { crate::base64::encode_prefix(backend, dst, src) };
+    let mut acc: u32 = 0;
+    let mut acc_len: u32 = 0;
+
+    for &byte in &src[consumed..] {
         // The C writes `(acc << 8) + *buf++`; the low 8 bits of `acc << 8` are
         // zero, so `|` is the same value and cannot overflow in debug builds.
         acc = (acc << 8) | byte as u32;
@@ -433,10 +495,79 @@ pub fn to_base64(dst: &mut [u8], src: &[u8]) -> Result<usize, Error> {
 /// [`Error::DecodingFail`] if `dst` is too small, if `acc_len > 4` at the end,
 /// or if any buffered low bits are non-zero.
 pub fn from_base64(dst: &mut [u8], src: &[u8]) -> Result<(usize, usize), Error> {
+    if src.len() < crate::base64::MIN_DECODE_LEN {
+        // As in the encoder, keep both lookup and generalized prefix state out
+        // of inputs too short for this architecture's smallest vector.
+        return from_base64_scalar(dst, src);
+    }
+    let backend = crate::base64::base64_backend();
+    // SAFETY: as in `to_base64`, detection proves the feature contract.
+    unsafe { from_base64_with_backend(dst, src, backend) }
+}
+
+/// The original reference-C loop, kept whole for the scalar and short-input
+/// paths just like [`to_base64_scalar`].
+#[inline(always)]
+fn from_base64_scalar(dst: &mut [u8], src: &[u8]) -> Result<(usize, usize), Error> {
+    let mut consumed = 0usize;
     let mut len = 0usize;
     let mut acc: u32 = 0;
     let mut acc_len: u32 = 0;
-    let mut consumed = 0usize;
+
+    loop {
+        // Past the end of the slice, feed the NUL the C would have read.
+        let c = match src.get(consumed) {
+            Some(&byte) => byte as u32,
+            None => 0,
+        };
+        let d = b64_char_to_byte(c);
+        if d == 0xFF {
+            break;
+        }
+        consumed += 1;
+        acc = (acc << 6) | d;
+        acc_len += 6;
+        if acc_len >= 8 {
+            acc_len -= 8;
+            if len >= dst.len() {
+                return Err(Error::DecodingFail);
+            }
+            dst[len] = ((acc >> acc_len) & 0xFF) as u8;
+            len += 1;
+        }
+    }
+
+    if acc_len > 4 || (acc & ((1u32 << acc_len) - 1)) != 0 {
+        return Err(Error::DecodingFail);
+    }
+
+    Ok((len, consumed))
+}
+
+/// Decode with an explicitly selected Base64 backend.
+///
+/// This preserves [`from_base64`]'s exact stopping and error behavior and is
+/// exposed only as an unstable differential-test/benchmark hook.
+///
+/// # Safety
+///
+/// `backend` must be executable on the current CPU, as reported by
+/// [`Base64Backend::is_available`].
+#[inline]
+pub unsafe fn from_base64_with_backend(
+    dst: &mut [u8],
+    src: &[u8],
+    backend: Base64Backend,
+) -> Result<(usize, usize), Error> {
+    if backend == Base64Backend::Scalar {
+        return from_base64_scalar(dst, src);
+    }
+
+    // SAFETY: transferred from this function's caller. Each backend checks the
+    // supplied slice lengths before loading or storing a complete block.
+    let (mut consumed, mut len) = unsafe { crate::base64::decode_prefix(backend, dst, src) };
+    let mut acc: u32 = 0;
+    let mut acc_len: u32 = 0;
 
     loop {
         // Past the end of the slice, feed the NUL the C would have read.
@@ -891,6 +1022,28 @@ mod tests {
         Ok(out)
     }
 
+    fn b64_with_backend(
+        dst: &mut [u8],
+        src: &[u8],
+        backend: Base64Backend,
+    ) -> Result<usize, Error> {
+        assert!(backend.is_available());
+        // SAFETY: the assertion establishes this test process can execute the
+        // requested backend; slice bounds remain checked by the implementation.
+        unsafe { to_base64_with_backend(dst, src, backend) }
+    }
+
+    fn unb64_with_backend(
+        dst: &mut [u8],
+        src: &[u8],
+        backend: Base64Backend,
+    ) -> Result<(usize, usize), Error> {
+        assert!(backend.is_available());
+        // SAFETY: as in `b64_with_backend`, availability is proved immediately
+        // above and both pointer/length pairs come from live slices.
+        unsafe { from_base64_with_backend(dst, src, backend) }
+    }
+
     // -- lengths ------------------------------------------------------------
 
     #[test]
@@ -1108,6 +1261,98 @@ mod tests {
                 .collect();
             let encoded = b64(&src);
             assert_eq!(unb64(&encoded).unwrap(), src, "len {len}");
+        }
+    }
+
+    /// Every executable SIMD backend against the scalar oracle, across the
+    /// block boundaries and tails each implementation can take. This checks
+    /// the primitive directly rather than relying on PHC vectors whose usual
+    /// 16/32-byte fields exercise only two shapes.
+    #[test]
+    fn every_base64_backend_matches_scalar_across_lengths() {
+        for len in 0usize..=512 {
+            let src: Vec<u8> = (0..len)
+                .map(|i| (i as u8).wrapping_mul(197) ^ (len as u8).wrapping_mul(11))
+                .collect();
+            let capacity = b64_len_usize(len) + 1;
+            let mut expected = vec![0xa5; capacity];
+            let expected_len =
+                b64_with_backend(&mut expected, &src, Base64Backend::Scalar).unwrap();
+
+            for &backend in Base64Backend::ALL {
+                if !backend.is_available()
+                    || (cfg!(miri) && backend != Base64Backend::Scalar)
+                {
+                    continue;
+                }
+                let mut actual = vec![0xa5; capacity];
+                let actual_len = b64_with_backend(&mut actual, &src, backend).unwrap();
+                assert_eq!(actual_len, expected_len, "{backend} length {len}");
+                assert_eq!(actual, expected, "{backend} bytes at length {len}");
+
+                let mut scalar_decoded = vec![0x5a; len];
+                let scalar_result = unb64_with_backend(
+                    &mut scalar_decoded,
+                    &expected[..expected_len],
+                    Base64Backend::Scalar,
+                );
+                let mut simd_decoded = vec![0x5a; len];
+                let simd_result = unb64_with_backend(
+                    &mut simd_decoded,
+                    &expected[..expected_len],
+                    backend,
+                );
+                assert_eq!(simd_result, scalar_result, "{backend} decode length {len}");
+                assert_eq!(simd_decoded, scalar_decoded, "{backend} decode bytes {len}");
+                assert_eq!(simd_decoded, src, "{backend} round trip {len}");
+            }
+        }
+    }
+
+    /// An invalid byte in a vector must not make the SIMD prefix lose the C
+    /// decoder's exact stopping position. The vector is retried by scalar, so
+    /// both the return value and all bytes written before an error match.
+    #[test]
+    fn every_base64_backend_matches_scalar_on_invalid_bytes_and_short_outputs() {
+        let raw: Vec<u8> = (0..96)
+            .map(|i| (i as u8).wrapping_mul(37) ^ 0x5a)
+            .collect();
+        let encoded = b64(&raw);
+
+        for &backend in Base64Backend::ALL {
+            if !backend.is_available() || (cfg!(miri) && backend != Base64Backend::Scalar) {
+                continue;
+            }
+
+            for pos in 0..encoded.len() {
+                for invalid in [0, b'$', b'=', 0x80, 0xff] {
+                    let mut input = encoded.clone();
+                    input[pos] = invalid;
+                    let mut expected = vec![0xa5; raw.len()];
+                    let expected_result = unb64_with_backend(
+                        &mut expected,
+                        &input,
+                        Base64Backend::Scalar,
+                    );
+                    let mut actual = vec![0xa5; raw.len()];
+                    let actual_result = unb64_with_backend(&mut actual, &input, backend);
+                    assert_eq!(actual_result, expected_result, "{backend} pos {pos} byte {invalid:#x}");
+                    assert_eq!(actual, expected, "{backend} output at pos {pos} byte {invalid:#x}");
+                }
+            }
+
+            for dst_len in 0..raw.len() {
+                let mut expected = vec![0xa5; dst_len];
+                let expected_result = unb64_with_backend(
+                    &mut expected,
+                    &encoded,
+                    Base64Backend::Scalar,
+                );
+                let mut actual = vec![0xa5; dst_len];
+                let actual_result = unb64_with_backend(&mut actual, &encoded, backend);
+                assert_eq!(actual_result, expected_result, "{backend} dst length {dst_len}");
+                assert_eq!(actual, expected, "{backend} dst bytes at length {dst_len}");
+            }
         }
     }
 
