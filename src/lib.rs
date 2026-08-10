@@ -163,10 +163,19 @@
 //!
 //! # Panics
 //!
-//! Nothing reachable through the public API panics. Every failure is an
-//! [`Error`], whose numeric [`Error::as_c_code`] matches the C reference —
-//! except for the crate-specific codes below [`Error::MIN_C_CODE`], which the C
-//! has no equivalent for.
+//! No fallible path in this crate panics: hashing, verifying, encoding,
+//! decoding and parameter validation all report failure as an [`Error`], whose
+//! numeric [`Error::as_c_code`] matches the C reference — except for the
+//! crate-specific codes below [`Error::MIN_C_CODE`], which the C has no
+//! equivalent for.
+//!
+//! There is exactly one intentional exception, and it is not on a fallible
+//! path: [`ParamsBuilder::build_or_panic`](params::ParamsBuilder::build_or_panic)
+//! panics on invalid parameters. It exists so a `const` item can turn bad
+//! parameters into a *compile* error, which is what a panic in a `const`
+//! evaluation is. Anywhere a runtime error is the right answer, use
+//! [`ParamsBuilder::build`](params::ParamsBuilder::build) — it is the normal way
+//! in.
 
 #![no_std]
 #![warn(missing_docs)]
