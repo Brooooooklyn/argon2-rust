@@ -353,10 +353,17 @@ jobs:
           - os: macos-latest
             target-flag: --target aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Two ASan/libFuzzer targets: 2×5 min of runtime plus a cold nightly
+    # sanitizer build. Ubuntu has repeatedly cancelled at exactly 30 min
+    # (first target still compiling/running; second never started).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # cargo-fuzz builds into fuzz/target, not the crate root.
+          workspaces: fuzz -> target
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
