@@ -372,3 +372,33 @@ jobs:
       # fuzzer-derived shapes. Both assert only "never panics".
       - run: cargo fuzz run phc_decode ${{ matrix.target-flag }} -- -max_total_time=300
       - run: cargo fuzz run tiny_hash ${{ matrix.target-flag }} -- -max_total_time=300
+
+  # Single required check for branch protection: require only `done` instead
+  # of listing every job (and every matrix cell) as a required status check.
+  done:
+    runs-on: ubuntu-latest
+    # Job-level always(): a job whose `needs` include a failed or skipped
+    # dependency is SKIPPED by default, and a step-level always() cannot
+    # resurrect a skipped job. Without this, a failing upstream job would
+    # skip `done` itself — and a skipped aggregate check does not block a
+    # merge. always() forces `done` to run so the step below can fail the run.
+    if: ${{ always() }}
+    needs:
+      - test
+      - windows
+      - no-std
+      - docs
+      - msrv
+      - entropy-target-matrix
+      - old-glibc
+      - wasm
+      - benches-compile
+      - miri
+      - asan
+      - fuzz
+    steps:
+      # `skipped` is included because a failed job (or a failed dependency
+      # upstream of another needed job) leaves the affected `needs` as
+      # `skipped`, not `failure`.
+      - run: exit 1
+        if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')) }}
