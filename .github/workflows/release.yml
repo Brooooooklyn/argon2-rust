@@ -1,118 +1,80 @@
-name: Release
+name: Release-plz
 
-# Publishes to crates.io through Trusted Publishing: GitHub mints an OIDC JWT
-# for this workflow, crates.io exchanges it for a short-lived `publish-update`
-# token, and `rust-lang/crates-io-auth-action`'s post step revokes that token
-# when the job ends. No long-lived API token is stored in this repository.
+# Automates crates.io releases the way napi-rs does:
+#   1. On every push to main, open/update a "release PR" that bumps version
+#      and changelog from conventional commits.
+#   2. When that PR lands, publish any package whose Cargo.toml version is
+#      not yet on crates.io, then create the matching git tag + GitHub Release.
 #
-# crates.io matches the JWT against the Trusted Publisher configured on the
-# crate, so THREE values must agree with the settings page or the exchange is
-# refused: the repository owner (Brooooooklyn), the repository name
-# (argon2-rust), and this file's name (release.yml). Renaming this file breaks
-# publishing until the configuration is updated to match.
+# Publishing uses crates.io Trusted Publishing (OIDC → short-lived token).
+# crates.io matches the JWT against the Trusted Publisher on the crate, so
+# THREE values must agree or the exchange is refused:
+#   repository  Brooooooklyn/argon2-rust
+#   workflow    release.yml   (this file)
+#   environment release       (the `environment:` key on the publish job)
+# Renaming this file or dropping the environment without updating crates.io
+# breaks publishing. The crate is `trustpub_only`, so an API token cannot
+# work around a misconfig. The human gate is merging the release PR; this
+# job also runs on every main push and is a no-op when already published.
+
+permissions:
+  pull-requests: write
+  contents: write
 
 on:
   push:
-    tags: ["v*"]
-
-env:
-  CARGO_TERM_COLOR: always
-  # Same pinned reference clone as ci.yml. The KAT and differential tests read
-  # it from disk and hard-fail without it; they do not silently skip.
-  PHC_COMMIT: f57e61e19229e23c4445b85494dbf7c07de721cb
+    branches:
+      - main
 
 jobs:
-  # An upload to crates.io is permanent — a version can be yanked but never
-  # replaced or re-uploaded. So the suite runs once more against the exact tagged
-  # commit before anything leaves the runner, rather than trusting that the CI
-  # run on main covered this tree.
-  verify:
-    name: verify tag ${{ github.ref_name }}
+  # Release unpublished packages.
+  release-plz-release:
+    name: Release-plz release
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      # The tag and Cargo.toml are two copies of one version number, which is
-      # two things to forget to update. Fail loudly here instead of publishing
-      # a version nobody tagged.
-      - name: Tag matches the package version
-        run: |
-          # `^version` is anchored on purpose: it matches the [package] key and
-          # not `rust-version`, nor any dependency's inline `version = `.
-          manifest=$(grep -m1 '^version *= *' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
-          tag="${GITHUB_REF_NAME#v}"
-          test -n "$manifest" || { echo "::error::no version in Cargo.toml"; exit 1; }
-          if [ "$manifest" != "$tag" ]; then
-            echo "::error::tag v$tag does not match Cargo.toml version $manifest"
-            exit 1
-          fi
-          echo "publishing $manifest"
-
-      - name: Clone phc-winner-argon2 (KAT traces + differential reference)
-        run: |
-          git clone --filter=blob:none https://github.com/P-H-C/phc-winner-argon2.git phc-winner-argon2
-          cd phc-winner-argon2 && git checkout "$PHC_COMMIT"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: cargo test (release)
-        run: cargo test --release --locked
-
-      # What downstream actually gets: the packaged tarball, built from the
-      # `exclude` list in Cargo.toml rather than from the working tree. A file
-      # excluded by mistake fails here and not in a user's build.
-      - name: cargo publish --dry-run
-        run: cargo publish --dry-run --locked
-
-  publish:
-    name: publish to crates.io
-    needs: verify
-    runs-on: ubuntu-latest
-    # Set the same name in the Trusted Publisher's "Environment" field on
-    # crates.io. Add required reviewers to this environment in the repository
-    # settings and every publish then waits for a human approval.
+    if: ${{ github.repository_owner == 'Brooooooklyn' }}
+    # Required: Trusted Publisher is configured with Environment = release.
     environment: release
     permissions:
-      # Lets the job request the OIDC JWT. Without it the exchange fails.
+      contents: write
       id-token: write
-      contents: read
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      # crates.io has no pending-publisher concept, so a crate's FIRST version
-      # is always uploaded by hand with an API token — 0.0.1 was. Re-tagging or
-      # re-running a release would then hit "crate version already exists" and
-      # paint the run red for a version that is in fact published. Checking
-      # first makes this job idempotent: 404 means publish, 200 means done.
-      - name: Is this version already published?
-        id: check
-        run: |
-          v="${GITHUB_REF_NAME#v}"
-          code=$(curl -sS -o /dev/null -w '%{http_code}' \
-            -H 'User-Agent: argon2-rust release workflow' \
-            "https://crates.io/api/v1/crates/argon2-rust/$v")
-          case "$code" in
-            404) echo "published=false" >> "$GITHUB_OUTPUT" ;;
-            200) echo "published=true" >> "$GITHUB_OUTPUT"
-                 echo "::notice::argon2-rust $v is already on crates.io; skipping upload" ;;
-            # Anything else is crates.io being unreachable or unhappy. Do not
-            # guess which, and do not fall through to an upload attempt.
-            *)   echo "::error::unexpected HTTP $code from crates.io"; exit 1 ;;
-          esac
-
-      - name: Authenticate with crates.io
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
         id: auth
-        if: steps.check.outputs.published == 'false'
-        uses: rust-lang/crates-io-auth-action@v1
-
-      - name: cargo publish
-        if: steps.check.outputs.published == 'false'
-        run: cargo publish --locked
+      - name: Run release-plz
+        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
+        with:
+          command: release
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  # Create a PR with the new versions and changelog, preparing the next release.
+  release-plz-pr:
+    name: Release-plz PR
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'Brooooooklyn' }}
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
