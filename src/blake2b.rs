@@ -238,7 +238,18 @@ fn have_sse41() -> bool {
 /// about twice as slow as scalar in matched-process measurements. Keep the
 /// backend executable for explicit differential tests, but do not select it
 /// automatically for translated x86-64 processes.
-#[cfg(all(feature = "std", target_arch = "x86_64", target_os = "macos"))]
+///
+/// Gated `not(miri)` together with the only call site in
+/// [`detect_blake2b_backend`]: under Miri detection short-circuits to
+/// Scalar (no SIMD intrinsics), so compiling this helper would be dead
+/// code on `cargo miri test --test allocation_audit` (lib built without
+/// `cfg(test)`).
+#[cfg(all(
+    not(miri),
+    feature = "std",
+    target_arch = "x86_64",
+    target_os = "macos"
+))]
 fn prefer_sse41() -> bool {
     use core::ffi::{c_char, c_int, c_void};
 
@@ -273,6 +284,7 @@ fn prefer_sse41() -> bool {
 }
 
 #[cfg(all(
+    not(miri),
     any(target_arch = "x86", target_arch = "x86_64"),
     not(all(feature = "std", target_arch = "x86_64", target_os = "macos"))
 ))]
@@ -836,7 +848,12 @@ mod tests {
     #[test]
     fn detection_selects_the_preferred_executable_backend() {
         let expected = {
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            // Mirror `detect_blake2b_backend`: Miri has no SIMD path.
+            #[cfg(miri)]
+            {
+                Blake2bBackend::Scalar
+            }
+            #[cfg(all(not(miri), any(target_arch = "x86", target_arch = "x86_64")))]
             {
                 if have_avx512vl() {
                     Blake2bBackend::Avx512
@@ -848,7 +865,10 @@ mod tests {
                     Blake2bBackend::Scalar
                 }
             }
-            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+            #[cfg(all(
+                not(miri),
+                not(any(target_arch = "x86", target_arch = "x86_64"))
+            ))]
             {
                 Blake2bBackend::Scalar
             }
