@@ -93,6 +93,11 @@ NEON-vs-NEON row does not exist at all, because the reference has no NEON
 implementation to compare against. The x86-64 host below is the only place in
 this README where Rust SIMD is measured against C SIMD.
 
+![Apple M5 Max — argon2-rust vs C reference](assets/perf/m5-max-vs-c.svg)
+
+<details>
+<summary>Raw numbers</summary>
+
 | config | rust scalar | rust neon | C `ref.c` | C / neon | C / scalar |
 |---|---:|---:|---:|---:|---:|
 | 64 MiB, t=1, p=1 | 20.64 ms | **13.64 ms** | 20.88 ms | **1.53x** | 1.01x |
@@ -100,6 +105,8 @@ this README where Rust SIMD is measured against C SIMD.
 | 64 MiB, t=1, p=4 | 6.01 ms | **3.93 ms** | 5.75 ms | **1.46x** | 0.96x |
 | 256 MiB, t=1, p=1 | 94.00 ms | **66.79 ms** | 96.43 ms | **1.44x** | 1.03x |
 | 256 MiB, t=3, p=4 | 80.53 ms | **62.52 ms** | 83.84 ms | **1.34x** | 1.04x |
+
+</details>
 
 The port costs nothing against the C it is a port of (0.96x – 1.04x). NEON adds
 1.34x – 1.53x on top.
@@ -119,6 +126,11 @@ intrinsics, and this CPU runs them. C built in-place with the reference's own
 default `OPTTARGET=native`; the probe confirms `src/opt.c, avx512, fill_block
 3497 B: evex=498 pmuludq=32`.
 
+![AMD EPYC Genoa — argon2-rust vs C AVX-512](assets/perf/epyc-vs-c.svg)
+
+<details>
+<summary>Raw numbers</summary>
+
 | config | rust scalar | rust avx512 | C AVX-512 | C / rust |
 |---|---:|---:|---:|---:|
 | 64 MiB, t=1, p=1 | 83.30 ms | **43.93 ms** | 55.99 ms | **1.27x** |
@@ -126,6 +138,8 @@ default `OPTTARGET=native`; the probe confirms `src/opt.c, avx512, fill_block
 | 64 MiB, t=1, p=4 | 36.77 ms | **25.82 ms** | 33.84 ms | **1.31x** |
 | 256 MiB, t=1, p=1 | 349.63 ms | **194.38 ms** | 242.24 ms | **1.25x** |
 | 256 MiB, t=3, p=4 | 266.63 ms | **151.59 ms** | 206.89 ms | **1.36x** |
+
+</details>
 
 Five independent runs on this host — against an explicitly-flagged
 `-mavx512f -mavx512bw -mavx512dq -mavx512vl` build and against `-march=native` —
@@ -141,12 +155,19 @@ Every Rust backend was also timed against the C built at the **same** ISA tier,
 interleaved rep-by-rep, two independent runs over the five configurations
 (`ARGON2_BENCH_SUMMARY_BACKEND` selects the Rust arm so the pair matches):
 
+![EPYC Genoa — same-ISA whole-hash speedup](assets/perf/epyc-backends.svg)
+
+<details>
+<summary>Raw numbers</summary>
+
 | Rust backend | C build (probe-verified) | whole-hash range |
 |---|---|---|
 | scalar | `ref.c`, auto-vectorised to SSE2 | **0.89x – 1.04x** |
 | sse2 | `opt.c` SSE2, `vex256=14` | **1.09x – 1.31x** |
 | avx2 | `opt.c` AVX2, `vex256=288` | **1.05x – 1.31x** |
 | avx512 | `opt.c` AVX-512, `evex=496` | **1.18x – 1.44x** |
+
+</details>
 
 The `scalar` row is the honest loss: `ref.c` at the x86-64 baseline is **not**
 scalar, because the compiler auto-vectorises it to SSE2, so `Backend::Scalar`
@@ -161,6 +182,11 @@ method resolves about ±2% on this host. Ratios below that are not differences.
 C built with its own `-march=native` — its `fill_block` contains 503 AVX-512
 EVEX instructions, so this is the best the C can do on this machine.
 
+![Sapphire Rapids — vs C native AVX-512](assets/perf/spr-vs-c.svg)
+
+<details>
+<summary>Raw numbers</summary>
+
 | config | C (native AVX-512) | argon2-rust | speedup |
 |---|---:|---:|---:|
 | 64 MiB, t=1, p=1 | 50.0 ms | 24.9 ms | **2.01x** |
@@ -172,8 +198,15 @@ EVEX instructions, so this is the best the C can do on this machine.
 | 256 MiB, t=3, p=1 | 471.0 ms | 309.9 ms | **1.52x** |
 | 256 MiB, t=3, p=4 | 173.0 ms | 120.0 ms | **1.44x** |
 
+</details>
+
 Every reachable path wins — each Rust backend was also compared against the C
 built for the *same* ISA tier (60+ cells, all three variants):
+
+![Sapphire Rapids — same-ISA whole-hash speedup](assets/perf/spr-backends.svg)
+
+<details>
+<summary>Raw numbers</summary>
 
 | Rust backend | C build | whole-hash range | fill kernel only |
 |---|---|---|---|
@@ -181,6 +214,8 @@ built for the *same* ISA tier (60+ cells, all three variants):
 | sse2 | `opt.c` SSE2 / SSSE3 | 1.14x – 1.54x | 1.03x – 1.19x |
 | avx2 | `opt.c` AVX2 | 1.23x – 1.56x | 1.09x – 1.13x |
 | avx512 | `opt.c` AVX-512 | 1.44x – 2.05x | 1.16x – 1.28x |
+
+</details>
 
 The fill-kernel win comes from a fully-unrolled round schedule (823 → 574
 dynamic instructions per block) plus software prefetch of the reference block
@@ -217,11 +252,18 @@ is genuinely different machine code, not just a different call path.
 One self-timed C harness was built three ways from identical source and run
 round-robin at process granularity, so drift hits all three equally:
 
+![Does dlopen bias the C?](assets/perf/link-mode.svg)
+
+<details>
+<summary>Raw numbers</summary>
+
 | link mode | M5 Max | EPYC Genoa |
 |---|---:|---:|
 | `libargon2.a`, direct call | 1.000x | 1.000x |
 | `-largon2` shared, PLT | 0.990x – 0.998x | 0.978x – 1.012x |
 | `dlopen`, as the bench does | 0.985x – 1.003x | 0.965x – 0.985x |
+
+</details>
 
 `dlopen` lands *faster* than static on most rows and the sign of the difference
 flips between configurations, which is the signature of noise rather than a
@@ -232,12 +274,19 @@ one indirect call.
 
 Sapphire Rapids, in-process `EVP_KDF_derive` timing, tags verified identical:
 
+![vs OpenSSL 3.5 EVP_KDF Argon2](assets/perf/openssl.svg)
+
+<details>
+<summary>Raw numbers</summary>
+
 | config | OpenSSL 3.5.5 | argon2-rust | speedup |
 |---|---:|---:|---:|
 | 64 MiB, t=1, p=1 | 85.4 ms | 24.1 ms | **3.5x** |
 | 64 MiB, t=3, p=4 | 94.3 ms | 25.6 ms | **3.7x** |
 | 256 MiB, t=1, p=1 | 356.7 ms | 103.8 ms | **3.4x** |
 | 256 MiB, t=3, p=4 | 384.8 ms | 111.7 ms | **3.4x** |
+
+</details>
 
 (OpenSSL's Argon2 has no SIMD fill at all.)
 
@@ -250,6 +299,11 @@ interleaved, tags asserted identical, Argon2id:
 
 **x86-64 (Sapphire Rapids, AVX-512 backend)**
 
+![vs popular Rust crates — x86-64](assets/perf/crates-x86.svg)
+
+<details>
+<summary>Raw numbers</summary>
+
 | config | argon2-rust | RustCrypto | rust-argon2 | vs RustCrypto | vs rust-argon2 |
 |---|---:|---:|---:|---:|---:|
 | 64 MiB, t=1, p=1 | 23.6 ms | 57.0 | 85.8 | **2.4x** | **3.6x** |
@@ -257,7 +311,14 @@ interleaved, tags asserted identical, Argon2id:
 | 256 MiB, t=1, p=1 | 99.3 ms | 253.0 | 367.3 | **2.5x** | **3.7x** |
 | 256 MiB, t=3, p=4 | 115.7 ms | 600.9 | 874.3 | **5.2x** | **7.6x** |
 
+</details>
+
 **aarch64 (Apple Silicon, NEON backend)**
+
+![vs popular Rust crates — aarch64](assets/perf/crates-aarch64.svg)
+
+<details>
+<summary>Raw numbers</summary>
 
 | config | argon2-rust | RustCrypto | rust-argon2 | vs RustCrypto | vs rust-argon2 |
 |---|---:|---:|---:|---:|---:|
@@ -265,6 +326,8 @@ interleaved, tags asserted identical, Argon2id:
 | 64 MiB, t=3, p=4 | 13.7 ms | 65.0 | 83.5 | **4.8x** | **6.1x** |
 | 256 MiB, t=1, p=1 | 66.9 ms | 93.2 | 112.2 | **1.4x** | **1.7x** |
 | 256 MiB, t=3, p=4 | 62.0 ms | 292.0 | 351.2 | **4.7x** | **5.7x** |
+
+</details>
 
 Both crates compute lanes sequentially even at `p > 1`, so the margin grows
 with parallelism; the single-thread rows are the honest kernel-vs-kernel
