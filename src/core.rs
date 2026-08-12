@@ -1189,7 +1189,7 @@ impl Argon2 {
         }
     }
 
-    /// Derive a tag into `out`.
+    /// Derive a tag into `out` — the raw hash output (see [`crate::params::TagLen`]).
     ///
     /// `out.len()` must equal [`Params::tag_len_bytes`].
     ///

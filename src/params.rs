@@ -136,12 +136,14 @@ impl Memory {
     }
 }
 
-/// A tag length, carried in bytes.
+/// Length of an Argon2 **tag** — the raw hash output (digest / derived key).
 ///
-/// There is deliberately no `bits()` constructor: a bit count that is not a
+/// "Tag" is RFC 9106's name for what many APIs call the hash or digest. A
+/// 32-byte buffer from [`crate::Argon2::hash_into`] is a 256-bit tag; this
+/// type is how [`Params`] records that length. Carried in bytes: there is
+/// deliberately no `bits()` constructor, because a bit count that is not a
 /// whole number of bytes would be the only new failure mode in this API, and
-/// `TagLen::bytes(32)` already names the unit at the call site. RFC 9106's
-/// "256-bit tag" is written `TagLen::bytes(32)`.
+/// `TagLen::bytes(32)` already names the unit at the call site.
 ///
 /// Like [`Memory`], this validates nothing; [`ParamsBuilder::build`] does.
 ///
@@ -154,7 +156,7 @@ impl Memory {
 pub struct TagLen(u64);
 
 impl TagLen {
-    /// A tag length in bytes.
+    /// A tag length in bytes (RFC 9106's "256-bit tag" is `TagLen::bytes(32)`).
     #[inline]
     #[must_use]
     pub const fn bytes(bytes: u64) -> TagLen {
@@ -702,7 +704,7 @@ impl ParamsBuilder {
         self
     }
 
-    /// Set the tag length.
+    /// Set the tag length (raw hash output size; see [`TagLen`]).
     #[inline]
     #[must_use]
     pub const fn tag_len(mut self, tag_len: TagLen) -> ParamsBuilder {
@@ -891,7 +893,7 @@ impl Params {
         self.t_cost
     }
 
-    /// The tag length.
+    /// The tag length (raw hash output size; see [`TagLen`]).
     #[inline]
     #[must_use]
     pub const fn tag_len(&self) -> TagLen {
@@ -900,7 +902,8 @@ impl Params {
 
     /// The tag length in bytes (`context.outlen`).
     ///
-    /// A `usize`, losslessly: `build()` rejected anything wider.
+    /// Buffer size for [`crate::Argon2::hash_into`]. A `usize`, losslessly:
+    /// `build()` rejected anything wider.
     #[inline]
     #[must_use]
     pub const fn tag_len_bytes(&self) -> usize {
