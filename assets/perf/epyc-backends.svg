@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="306" viewBox="0 0 920 306" role="img" aria-label="EPYC Genoa — same-ISA whole-hash speedup">
+  <title>EPYC Genoa — same-ISA whole-hash speedup</title>
+  <desc>Each Rust backend vs C built for the same ISA tier · two runs × five configs</desc>
+  <defs>
+    <style><![CDATA[
+      .bar {
+        transform-box: fill-box;
+        transform-origin: left center;
+        animation: grow 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
+      }
+      .fade { animation: fadein 0.45s ease-out both; }
+      @keyframes grow {
+        from { transform: scaleX(0); opacity: 0.35; }
+        to   { transform: scaleX(1); opacity: 0.9; }
+      }
+      @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+      @media (prefers-reduced-motion: reduce) {
+        .bar, .fade { animation: none; }
+      }
+    ]]></style>
+  </defs>
+  <rect width="920" height="306" rx="12" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="24" y="28" fill="#e6edf3" font-size="16" font-weight="600"
+        font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif">EPYC Genoa — same-ISA whole-hash speedup</text>
+  <text x="24" y="46" fill="#8b949e" font-size="11"
+        font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif">Each Rust backend vs C built for the same ISA tier · two runs × five configs</text>
+  <line x1="278.0" y1="74" x2="278.0" y2="258"
+        stroke="#484f58" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="278.0" y="68" text-anchor="middle" fill="#8b949e" font-size="10"
+        font-family="ui-monospace,SFMono-Regular,Menlo,monospace">1.0x</text>
+  <rect x="100" y="92" width="700" height="18" rx="9" fill="#21262d"/><rect class="bar" x="147.5" y="92" width="178.0" height="18" rx="9" fill="#3fb950" opacity="0.9" style="animation-delay:0.10s"/><rect x="100" y="136" width="700" height="18" rx="9" fill="#21262d"/><rect class="bar" x="384.7" y="136" width="261.0" height="18" rx="9" fill="#3fb950" opacity="0.9" style="animation-delay:0.20s"/><rect x="100" y="180" width="700" height="18" rx="9" fill="#21262d"/><rect class="bar" x="337.3" y="180" width="308.5" height="18" rx="9" fill="#3fb950" opacity="0.9" style="animation-delay:0.30s"/><rect x="100" y="224" width="700" height="18" rx="9" fill="#21262d"/><rect class="bar" x="491.5" y="224" width="308.5" height="18" rx="9" fill="#3fb950" opacity="0.9" style="animation-delay:0.40s"/>
+  <text x="88" y="102" text-anchor="end" fill="#e6edf3" font-size="13" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif">scalar</text><text x="88" y="146" text-anchor="end" fill="#e6edf3" font-size="13" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif">sse2</text><text x="88" y="190" text-anchor="end" fill="#e6edf3" font-size="13" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif">avx2</text><text x="88" y="234" text-anchor="end" fill="#e6edf3" font-size="13" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif">avx512</text>
+  <text class="fade" x="333.4" y="105" fill="#e6edf3" font-size="12" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" style="animation-delay:0.30s">0.89x – 1.04x</text><text class="fade" x="653.8" y="149" fill="#e6edf3" font-size="12" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" style="animation-delay:0.40s">1.09x – 1.31x</text><text class="fade" x="653.8" y="193" fill="#e6edf3" font-size="12" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" style="animation-delay:0.50s">1.05x – 1.31x</text><text class="fade" x="808.0" y="237" fill="#e6edf3" font-size="12" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" style="animation-delay:0.60s">1.18x – 1.44x</text>
+  <text x="24" y="290" fill="#8b949e" font-size="10"
+        font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif">range of C/rust ratios · dashed line = parity · higher is better for this crate</text>
+</svg>
