@@ -136,27 +136,22 @@ impl Memory {
     }
 }
 
-/// Length of an Argon2 **tag** — the raw hash output (digest / derived key).
+/// Length of an Argon2 **tag** (raw hash output), in bytes.
 ///
-/// "Tag" is RFC 9106's name for what many APIs call the hash or digest. A
-/// 32-byte buffer from [`crate::Argon2::hash_into`] is a 256-bit tag; this
-/// type is how [`Params`] records that length. Carried in bytes: there is
-/// deliberately no `bits()` constructor, because a bit count that is not a
-/// whole number of bytes would be the only new failure mode in this API, and
-/// `TagLen::bytes(32)` already names the unit at the call site.
-///
+/// RFC 9106's name for the digest. No `bits()` constructor — only whole bytes.
 /// Like [`Memory`], this validates nothing; [`ParamsBuilder::build`] does.
 ///
 /// ```
 /// use argon2_rust::params::TagLen;
 ///
+/// // RFC 9106's "256-bit tag"
 /// assert_eq!(TagLen::bytes(32).as_bytes(), 32);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TagLen(u64);
 
 impl TagLen {
-    /// A tag length in bytes (RFC 9106's "256-bit tag" is `TagLen::bytes(32)`).
+    /// A tag length in bytes.
     #[inline]
     #[must_use]
     pub const fn bytes(bytes: u64) -> TagLen {
@@ -704,7 +699,7 @@ impl ParamsBuilder {
         self
     }
 
-    /// Set the tag length (raw hash output size; see [`TagLen`]).
+    /// Set the tag length.
     #[inline]
     #[must_use]
     pub const fn tag_len(mut self, tag_len: TagLen) -> ParamsBuilder {
@@ -893,7 +888,7 @@ impl Params {
         self.t_cost
     }
 
-    /// The tag length (raw hash output size; see [`TagLen`]).
+    /// The tag length.
     #[inline]
     #[must_use]
     pub const fn tag_len(&self) -> TagLen {
@@ -902,8 +897,7 @@ impl Params {
 
     /// The tag length in bytes (`context.outlen`).
     ///
-    /// Buffer size for [`crate::Argon2::hash_into`]. A `usize`, losslessly:
-    /// `build()` rejected anything wider.
+    /// A `usize`, losslessly: `build()` rejected anything wider.
     #[inline]
     #[must_use]
     pub const fn tag_len_bytes(&self) -> usize {
