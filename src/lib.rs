@@ -17,11 +17,9 @@
 //! ```
 //! use argon2_rust::{Algorithm, Argon2, Error, Params, Version};
 //!
-//! // `Params::default()` is m=19456 KiB (19 MiB), t=2, 1 lane, 32-byte tag:
-//! // the OWASP-style figure this crate ships as its default, and a sound
-//! // starting point for a password store. One hash of it measures about 8 ms
-//! // in a release build on an M-series laptop, cheap enough that this runs as
-//! // a real doctest. Raise `m_cost` until it fits your own timing budget.
+//! // Default: 19 MiB, t=2, 1 lane, 32-byte tag (raw hash output). ~8 ms per
+//! // hash in release on M-series — cheap enough for a real doctest. Raise
+//! // `m_cost` until it fits your budget.
 //! let params = Params::default();
 //! let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 //!

@@ -136,18 +136,15 @@ impl Memory {
     }
 }
 
-/// A tag length, carried in bytes.
+/// Length of an Argon2 **tag** (raw hash output), in bytes.
 ///
-/// There is deliberately no `bits()` constructor: a bit count that is not a
-/// whole number of bytes would be the only new failure mode in this API, and
-/// `TagLen::bytes(32)` already names the unit at the call site. RFC 9106's
-/// "256-bit tag" is written `TagLen::bytes(32)`.
-///
+/// RFC 9106's name for the digest. No `bits()` constructor — only whole bytes.
 /// Like [`Memory`], this validates nothing; [`ParamsBuilder::build`] does.
 ///
 /// ```
 /// use argon2_rust::params::TagLen;
 ///
+/// // RFC 9106's "256-bit tag"
 /// assert_eq!(TagLen::bytes(32).as_bytes(), 32);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
