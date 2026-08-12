@@ -337,7 +337,7 @@ comparison.
 
 ```toml
 [dependencies]
-argon2-rust = "0.0.2"
+argon2-rust = "1"
 ```
 
 ```rust
@@ -439,6 +439,28 @@ the CPU lacks. Explicit-backend entry points exist for testing and are
 
 `--no-default-features` builds for `no_std` (with `alloc`), including e.g.
 `thumbv7em-none-eabi`.
+
+## SemVer policy
+
+From `1.0.0` onward this crate follows [Semantic
+Versioning](https://semver.org/spec/v2.0.0.html):
+
+- **Covered by SemVer:** the public API under default features — crate-root
+  re-exports (`Argon2`, `Hasher`, `Params`, `Algorithm`, `Version`, `Error`,
+  `Backend`, …), the `params` and `error` modules, PHC encode/verify behaviour
+  for supported versions, and the meaning of default features (`std`,
+  `parallel`, `zeroize-memory`).
+- **Not covered:** the `internal-api` feature and everything under
+  `__internal` (explicitly unstable; may change in a patch).
+- **MSRV** (`rust-version` in `Cargo.toml`) may rise on a **minor** release
+  when a newer compiler is required for a documented reason (today: stabilized
+  AVX-512 stdarch at 1.89). It does not rise in a patch solely to use newer
+  language sugar.
+- Optional features added later (for example a future `password-hash` trait
+  façade) are non-breaking when they default off.
+
+This is a pure-Rust port of the C reference with PHC string interop — not an
+implementation of the RustCrypto `password-hash` traits. See the crate docs.
 
 ## C parser compatibility limits
 

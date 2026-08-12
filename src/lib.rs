@@ -86,7 +86,15 @@
 //! impls either, though its full state round-trips through the accessors and
 //! [`Params::to_builder`]. Interoperation is at the string level — the PHC
 //! strings this crate reads and writes are the ones the `argon2` crate reads and
-//! writes.
+//! writes. A future optional feature for those traits would be additive and
+//! would not change this default surface.
+//!
+//! # SemVer
+//!
+//! From `1.0.0`, the default-feature public API is covered by Semantic
+//! Versioning. The `internal-api` feature and its `__internal` module are not.
+//! MSRV may rise on a minor release. See the README "SemVer policy" section for
+//! the full list.
 //!
 //! # Reusing memory across hashes
 //!

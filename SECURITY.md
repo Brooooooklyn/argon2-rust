@@ -9,7 +9,7 @@ a substitute for an audit.
 
 ## Supported versions
 
-Before `1.0.0`, only the latest published release receives security fixes.
+The latest `1.x` release receives security fixes. Older `1.x` minors may not.
 Users should upgrade promptly when a new release is published.
 
 ## Reporting a vulnerability

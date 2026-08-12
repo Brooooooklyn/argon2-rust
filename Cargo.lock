@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "argon2-rust"
-version = "0.0.3"
+version = "1.0.0"
 dependencies = [
  "argon2-rust",
  "bumpalo",

@@ -1,6 +1,6 @@
 [package]
 name = "argon2-rust"
-version = "0.0.3"
+version = "1.0.0"
 edition = "2024"
 # Set by ONE thing: `stdarch_x86_avx512` (AVX-512 intrinsics + the `avx512f`
 # target feature) stabilized in 1.89. Nothing else here needs newer than 1.88.
@@ -11,6 +11,7 @@ description = "Pure-Rust port of the reference Argon2 implementation (phc-winner
 license = "MIT"
 repository = "https://github.com/Brooooooklyn/argon2-rust"
 homepage = "https://github.com/Brooooooklyn/argon2-rust"
+documentation = "https://docs.rs/argon2-rust"
 readme = "README.md"
 exclude = ["/.github", "/benches", "/tests", "/fuzz", "/vm.sh", "/renovate.json"]
 keywords = ["argon2", "password-hash", "kdf", "simd", "crypto"]
@@ -19,6 +20,10 @@ categories = ["cryptography", "no-std"]
 # also auto-discover anything matching `benches/*.rs`, and `benches/support/`
 # holds a module both benches `#[path]`-include rather than a bench of its own.
 autobenches = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 # The library target is `argon2_rust` (dashes become underscores).
 # Tests and benches use `use argon2_rust::...`.
