@@ -1,43 +1,28 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="920" height="262" viewBox="0 0 920 262" role="img" aria-label="Does dlopen bias the C?  No.">
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="279" viewBox="0 0 900 279" role="img" aria-label="Does dlopen bias the C?  No.">
   <title>Does dlopen bias the C?  No.</title>
-  <desc>Self-timed C harness · three link modes · normalized to static archive. normalized to static = 1.0 · shared/dlopen shown as range midpoints · noise, not systematic cost</desc>
-  <defs>
-    <style><![CDATA[
-      /* Default styles are the final (visible) state so a frozen or
-         animation-stripped render still shows the full chart. */
-      .bar {
-        transform-box: fill-box;
-        transform-origin: left center;
-        animation: grow 0.85s cubic-bezier(0.22, 1, 0.36, 1) both;
-      }
-      .fade {
-        animation: fadein 0.5s ease-out both;
-      }
-      @keyframes grow {
-        from { transform: scaleX(0); opacity: 0.4; }
-        to   { transform: scaleX(1); opacity: 1; }
-      }
-      @keyframes fadein {
-        from { opacity: 0; }
-        to   { opacity: 1; }
-      }
-      @media (prefers-reduced-motion: reduce) {
-        .bar, .fade { animation: none; }
-      }
-    ]]></style>
-  </defs>
-  <rect width="920" height="262" rx="12" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
-  <rect x="1" y="1" width="918" height="260" rx="11" fill="#161b22" opacity="0.35"/>
-  <text x="24" y="28" fill="#e6edf3" font-size="16" font-weight="600"
-        font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif">Does dlopen bias the C?  No.</text>
-  <text x="24" y="46" fill="#8b949e" font-size="11"
-        font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif">Self-timed C harness · three link modes · normalized to static archive</text>
-  <rect x="168" y="48" width="10" height="10" rx="2" fill="#79c0ff"/><text x="182" y="57" fill="#8b949e" font-size="11" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif">M5 Max</text><rect x="239.6" y="48" width="10" height="10" rx="2" fill="#d2a8ff"/><text x="253.6" y="57" fill="#8b949e" font-size="11" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif">EPYC Genoa</text>
-  <text x="156" y="96.0" text-anchor="end" fill="#e6edf3" font-size="12" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif">libargon2.a static</text><text x="156" y="140.0" text-anchor="end" fill="#e6edf3" font-size="12" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif">shared · -largon2 PLT</text><text x="156" y="184.0" text-anchor="end" fill="#e6edf3" font-size="12" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif">dlopen (as the bench)</text>
-  <rect class="bar" x="168" y="78" width="629.63" height="12" rx="3" fill="#79c0ff" style="animation-delay:0.080s"/><rect class="bar" x="168" y="93" width="629.63" height="12" rx="3" fill="#d2a8ff" style="animation-delay:0.125s"/><rect class="bar" x="168" y="122" width="625.85" height="12" rx="3" fill="#79c0ff" style="animation-delay:0.170s"/><rect class="bar" x="168" y="137" width="626.48" height="12" rx="3" fill="#d2a8ff" style="animation-delay:0.215s"/><rect class="bar" x="168" y="166" width="625.85" height="12" rx="3" fill="#79c0ff" style="animation-delay:0.260s"/><rect class="bar" x="168" y="181" width="613.89" height="12" rx="3" fill="#d2a8ff" style="animation-delay:0.305s"/>
-  <text class="fade" x="803.6" y="88" fill="#8b949e" font-size="10" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" style="animation-delay:0.230s">1.000×</text><text class="fade" x="803.6" y="103" fill="#8b949e" font-size="10" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" style="animation-delay:0.275s">1.000×</text><text class="fade" x="799.9" y="132" fill="#8b949e" font-size="10" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" style="animation-delay:0.320s">0.994×</text><text class="fade" x="800.5" y="147" fill="#8b949e" font-size="10" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" style="animation-delay:0.365s">0.995×</text><text class="fade" x="799.9" y="176" fill="#8b949e" font-size="10" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" style="animation-delay:0.410s">0.994×</text><text class="fade" x="787.9" y="191" fill="#8b949e" font-size="10" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" style="animation-delay:0.455s">0.975×</text>
-  
-  <text x="24" y="246" fill="#8b949e" font-size="10"
-        font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif">normalized to static = 1.0 · shared/dlopen shown as range midpoints · noise, not systematic cost</text>
+  <desc>Self-timed C harness · three link modes · midpoints of measured ranges. normalized to static = 1.0 · midpoints shown · noise, not a systematic cost</desc>
+  <rect width="900" height="279" rx="12" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <rect x="1" y="1" width="898" height="277" rx="11" fill="#161b22" opacity="0.4"/>
+  <text x="22" y="26" fill="#e6edf3" font-size="15" font-weight="600" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif">Does dlopen bias the C?  No.</text>
+  <text x="22" y="44" fill="#8b949e" font-size="11" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif">Self-timed C harness · three link modes · midpoints of measured ranges</text>
+  <rect x="170" y="52" width="11" height="11" rx="2" fill="#79c0ff"/><text x="186" y="61" fill="#8b949e" font-size="11" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif">M5 Max</text><rect x="254" y="52" width="11" height="11" rx="2" fill="#d2a8ff"/><text x="270" y="61" fill="#8b949e" font-size="11" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif">EPYC Genoa</text>
+    <text x="158" y="104.5" text-anchor="end" fill="#e6edf3" font-size="12" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif">static  libargon2.a</text>
+  <rect x="170.0" y="84.0" width="662.9" height="14" rx="3" fill="#79c0ff"><animate attributeName="width" values="0;0;662.9" dur="0.81s" begin="0s" fill="freeze" calcMode="spline" keyTimes="0;0.074;1" keySplines="0 0 1 1;0.25 0.1 0.25 1"/></rect>
+  <text x="878.0" y="96.0" text-anchor="end" fill="#8b949e" font-size="11" font-weight="400" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" opacity="1"><animate attributeName="opacity" values="0;0;1" dur="0.86s" begin="0s" fill="freeze" keyTimes="0;0.593;1"/>1.000×</text>
+  <rect x="170.0" y="103.0" width="662.9" height="14" rx="3" fill="#d2a8ff"><animate attributeName="width" values="0;0;662.9" dur="0.85s" begin="0s" fill="freeze" calcMode="spline" keyTimes="0;0.118;1" keySplines="0 0 1 1;0.25 0.1 0.25 1"/></rect>
+  <text x="878.0" y="115.0" text-anchor="end" fill="#8b949e" font-size="11" font-weight="400" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" opacity="1"><animate attributeName="opacity" values="0;0;1" dur="0.90s" begin="0s" fill="freeze" keyTimes="0;0.611;1"/>1.000×</text>
+  <line x1="170" y1="127.0" x2="866" y2="127.0" stroke="#30363d" stroke-width="1" opacity="0.5"/>
+  <text x="158" y="155.5" text-anchor="end" fill="#e6edf3" font-size="12" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif">shared  -largon2 PLT</text>
+  <rect x="170.0" y="135.0" width="658.9" height="14" rx="3" fill="#79c0ff"><animate attributeName="width" values="0;0;658.9" dur="0.89s" begin="0s" fill="freeze" calcMode="spline" keyTimes="0;0.157;1" keySplines="0 0 1 1;0.25 0.1 0.25 1"/></rect>
+  <text x="878.0" y="147.0" text-anchor="end" fill="#8b949e" font-size="11" font-weight="400" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" opacity="1"><animate attributeName="opacity" values="0;0;1" dur="0.94s" begin="0s" fill="freeze" keyTimes="0;0.628;1"/>0.994×</text>
+  <rect x="170.0" y="154.0" width="659.5" height="14" rx="3" fill="#d2a8ff"><animate attributeName="width" values="0;0;659.5" dur="0.93s" begin="0s" fill="freeze" calcMode="spline" keyTimes="0;0.194;1" keySplines="0 0 1 1;0.25 0.1 0.25 1"/></rect>
+  <text x="878.0" y="166.0" text-anchor="end" fill="#8b949e" font-size="11" font-weight="400" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" opacity="1"><animate attributeName="opacity" values="0;0;1" dur="0.98s" begin="0s" fill="freeze" keyTimes="0;0.643;1"/>0.995×</text>
+  <line x1="170" y1="178.0" x2="866" y2="178.0" stroke="#30363d" stroke-width="1" opacity="0.5"/>
+  <text x="158" y="206.5" text-anchor="end" fill="#e6edf3" font-size="12" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif">dlopen  (as the bench)</text>
+  <rect x="170.0" y="186.0" width="658.9" height="14" rx="3" fill="#79c0ff"><animate attributeName="width" values="0;0;658.9" dur="0.97s" begin="0s" fill="freeze" calcMode="spline" keyTimes="0;0.227;1" keySplines="0 0 1 1;0.25 0.1 0.25 1"/></rect>
+  <text x="878.0" y="198.0" text-anchor="end" fill="#8b949e" font-size="11" font-weight="400" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" opacity="1"><animate attributeName="opacity" values="0;0;1" dur="1.02s" begin="0s" fill="freeze" keyTimes="0;0.657;1"/>0.994×</text>
+  <rect x="170.0" y="205.0" width="646.3" height="14" rx="3" fill="#d2a8ff"><animate attributeName="width" values="0;0;646.3" dur="1.01s" begin="0s" fill="freeze" calcMode="spline" keyTimes="0;0.257;1" keySplines="0 0 1 1;0.25 0.1 0.25 1"/></rect>
+  <text x="878.0" y="217.0" text-anchor="end" fill="#8b949e" font-size="11" font-weight="400" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" opacity="1"><animate attributeName="opacity" values="0;0;1" dur="1.06s" begin="0s" fill="freeze" keyTimes="0;0.670;1"/>0.975×</text>
+  <text x="22" y="265" fill="#8b949e" font-size="10" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif">normalized to static = 1.0 · midpoints shown · noise, not a systematic cost</text>
 </svg>
