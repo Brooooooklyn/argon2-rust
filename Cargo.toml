@@ -1,6 +1,6 @@
 [package]
 name = "argon2-rust"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 # Set by ONE thing: `stdarch_x86_avx512` (AVX-512 intrinsics + the `avx512f`
 # target feature) stabilized in 1.89. Nothing else here needs newer than 1.88.
