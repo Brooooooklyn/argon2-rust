@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (allocating) and [`to_base64`] / [`from_base64`] (caller buffer), plus
   [`Base64Backend`] and [`detected_base64_backend`]. Same SIMD dispatch the
   PHC encoder already used.
+- Public BLAKE2b one-shots [`blake2b`] / [`blake2b_long`], plus
+  [`Blake2bBackend`] and [`detected_blake2b_backend`]. Same x86 runtime
+  cascade Argon2 already used (AVX-512 → AVX2 → SSE4.1 → scalar).
 
 ## [1.0.0](https://github.com/Brooooooklyn/argon2-rust/compare/v0.0.3...v1.0.0) - 2026-08-12
 

@@ -221,6 +221,12 @@ impl Blake2bBackend {
     }
 }
 
+impl core::fmt::Display for Blake2bBackend {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 #[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
 fn have_sse41() -> bool {
     std::arch::is_x86_feature_detected!("sse4.1")

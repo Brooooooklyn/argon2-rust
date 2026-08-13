@@ -59,6 +59,11 @@
 //! and [`decode_base64`] for that codec on its own; [`detected_base64_backend`]
 //! reports which implementation this CPU picked.
 //!
+//! BLAKE2b (H0, the long expansion, and finalize) has its own cascade, x86
+//! only: AVX-512 → AVX2 → SSE4.1 → scalar. AArch64 stays on scalar; a NEON
+//! compress was measured slower. [`blake2b`] / [`blake2b_long`] are the
+//! one-shot entry points; [`detected_blake2b_backend`] reports the choice.
+//!
 //! # Features
 //!
 //! * `std` *(default)* — runtime CPU feature detection.
@@ -243,6 +248,7 @@ pub use crate::core::{Argon2, BOUNDED_MAX_SALT_LEN, Hasher};
 // `BOUNDED_MAX_SALT_LEN` is not, because `verify_encoded_bounded` works without
 // `std` and a caller has to be able to name the bound it is being held to.
 pub use crate::base64::Base64Backend;
+pub use crate::blake2b::{Blake2bBackend, blake2b, blake2b_long};
 #[cfg(feature = "std")]
 pub use crate::core::RANDOM_SALT_LEN;
 pub use crate::encoding::{decode_base64, encode_base64, encoded_len, from_base64, to_base64};
@@ -274,6 +280,23 @@ pub fn detected_backend() -> Backend {
 #[must_use]
 pub fn detected_base64_backend() -> Base64Backend {
     crate::base64::base64_backend()
+}
+
+/// The BLAKE2b [`Blake2bBackend`] this CPU resolved to, cached after the first
+/// call.
+///
+/// Diagnostic only — [`blake2b`], [`blake2b_long`], and every Argon2 hash call
+/// this for you. On aarch64 this is always [`Blake2bBackend::Scalar`]: a NEON
+/// compress was measured slower than the portable path, so there is no ARM
+/// SIMD backend to pick.
+///
+/// ```
+/// println!("argon2 blake2b backend: {}", argon2_rust::detected_blake2b_backend());
+/// ```
+#[inline]
+#[must_use]
+pub fn detected_blake2b_backend() -> Blake2bBackend {
+    crate::blake2b::blake2b_backend()
 }
 
 /// Unstable internals, exposed for this crate's own tests and benches.
