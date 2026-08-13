@@ -10,7 +10,8 @@ A pure-Rust port of the reference [Argon2](https://github.com/P-H-C/phc-winner-a
 implementation (RFC 9106), with **runtime-dispatched SIMD** — faster than the
 C reference, OpenSSL, and the popular Rust crates, on both x86-64 and aarch64.
 
-- **Zero mandatory dependencies**, `#![no_std]` + `alloc`
+- **`#![no_std]` + `alloc`**, one mandatory dependency (`memchr`, for PHC
+  field scans). Salt generation still talks to the OS with no extra crate
 - **Bit-exact with the C reference for Argon2 versions 16 and 19** — verified
   against the official KAT traces (12,304 lines of internal state per file),
   the official `test.c` vectors, and a live differential harness comparing tags
@@ -447,9 +448,11 @@ Versioning](https://semver.org/spec/v2.0.0.html):
 
 - **Covered by SemVer:** the public API under default features — crate-root
   re-exports (`Argon2`, `Hasher`, `Params`, `Algorithm`, `Version`, `Error`,
-  `Backend`, …), the `params` and `error` modules, PHC encode/verify behaviour
-  for supported versions, and the meaning of default features (`std`,
-  `parallel`, `zeroize-memory`).
+  `Backend`, `Base64Backend`, `Blake2bBackend`, `Decoded`, `encode_base64`,
+  `decode_base64`, `decode_phc`, `decode_string`, `encode_string`,
+  `blake2b`, `blake2b_long`, `constant_time_eq`, …), the `params` and `error`
+  modules, PHC encode/verify behaviour for supported versions, and the
+  meaning of default features (`std`, `parallel`, `zeroize-memory`).
 - **Not covered:** the `internal-api` feature and everything under
   `__internal` (explicitly unstable; may change in a patch).
 - **MSRV** (`rust-version` in `Cargo.toml`) may rise on a **minor** release

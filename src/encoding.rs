@@ -394,22 +394,28 @@ fn encoded_len_usize(
 ///
 /// [`Error::EncodingFail`] if `dst` is too small.
 pub fn to_base64(dst: &mut [u8], src: &[u8]) -> Result<usize, Error> {
+    to_base64_raw(dst.as_mut_ptr(), dst.len(), src)
+}
+
+fn to_base64_raw(dst: *mut u8, dst_len: usize, src: &[u8]) -> Result<usize, Error> {
     if src.len() < crate::base64::MIN_ENCODE_LEN {
         // Keep backend lookup and the generalized prefix state completely out
         // of tiny salts. This is the original scalar function's exact shape.
-        return to_base64_scalar(dst, src);
+        return to_base64_scalar(dst, dst_len, src);
     }
     let backend = crate::base64::base64_backend();
     // SAFETY: runtime detection returns only an executable backend.
-    unsafe { to_base64_with_backend(dst, src, backend) }
+    unsafe { to_base64_with_backend_raw(dst, dst_len, src, backend) }
 }
 
 /// The original reference-C loop, kept whole so short inputs do not pay for or
 /// inhibit optimization around a SIMD prefix they cannot use.
+///
+/// Writes only; `dst` may be uninitialized spare capacity.
 #[inline(always)]
-fn to_base64_scalar(dst: &mut [u8], src: &[u8]) -> Result<usize, Error> {
+fn to_base64_scalar(dst: *mut u8, dst_len: usize, src: &[u8]) -> Result<usize, Error> {
     let olen = b64_len_usize(src.len());
-    if dst.len() <= olen {
+    if dst_len <= olen {
         return Err(Error::EncodingFail);
     }
 
@@ -421,12 +427,20 @@ fn to_base64_scalar(dst: &mut [u8], src: &[u8]) -> Result<usize, Error> {
         acc_len += 8;
         while acc_len >= 6 {
             acc_len -= 6;
-            dst[written] = b64_byte_to_char((acc >> acc_len) & 0x3f);
+            // SAFETY: `written < olen < dst_len`.
+            unsafe {
+                dst.add(written)
+                    .write(b64_byte_to_char((acc >> acc_len) & 0x3f));
+            }
             written += 1;
         }
     }
     if acc_len > 0 {
-        dst[written] = b64_byte_to_char((acc << (6 - acc_len)) & 0x3f);
+        // SAFETY: the last leftover character is still inside `olen`.
+        unsafe {
+            dst.add(written)
+                .write(b64_byte_to_char((acc << (6 - acc_len)) & 0x3f));
+        }
         written += 1;
     }
 
@@ -449,17 +463,28 @@ pub unsafe fn to_base64_with_backend(
     src: &[u8],
     backend: Base64Backend,
 ) -> Result<usize, Error> {
+    // SAFETY: `dst` is a live initialized slice; the backend contract is the
+    // caller's, same as before this raw-pointer split.
+    unsafe { to_base64_with_backend_raw(dst.as_mut_ptr(), dst.len(), src, backend) }
+}
+
+unsafe fn to_base64_with_backend_raw(
+    dst: *mut u8,
+    dst_len: usize,
+    src: &[u8],
+    backend: Base64Backend,
+) -> Result<usize, Error> {
     if backend == Base64Backend::Scalar {
-        return to_base64_scalar(dst, src);
+        return to_base64_scalar(dst, dst_len, src);
     }
 
     let olen = b64_len_usize(src.len());
-    if dst.len() <= olen {
+    if dst_len <= olen {
         return Err(Error::EncodingFail);
     }
 
     // SAFETY: transferred from this function's caller. The capacity check
-    // above proves every complete vector store is within `dst`.
+    // above proves every complete vector store is within `dst_len`.
     let (consumed, mut written) = unsafe { crate::base64::encode_prefix(backend, dst, src) };
     let mut acc: u32 = 0;
     let mut acc_len: u32 = 0;
@@ -471,12 +496,20 @@ pub unsafe fn to_base64_with_backend(
         acc_len += 8;
         while acc_len >= 6 {
             acc_len -= 6;
-            dst[written] = b64_byte_to_char((acc >> acc_len) & 0x3F);
+            // SAFETY: `written` stays inside `olen < dst_len`.
+            unsafe {
+                dst.add(written)
+                    .write(b64_byte_to_char((acc >> acc_len) & 0x3F));
+            }
             written += 1;
         }
     }
     if acc_len > 0 {
-        dst[written] = b64_byte_to_char((acc << (6 - acc_len)) & 0x3F);
+        // SAFETY: leftover character is the last of `olen`.
+        unsafe {
+            dst.add(written)
+                .write(b64_byte_to_char((acc << (6 - acc_len)) & 0x3F));
+        }
         written += 1;
     }
 
@@ -497,20 +530,26 @@ pub unsafe fn to_base64_with_backend(
 /// [`Error::DecodingFail`] if `dst` is too small, if `acc_len > 4` at the end,
 /// or if any buffered low bits are non-zero.
 pub fn from_base64(dst: &mut [u8], src: &[u8]) -> Result<(usize, usize), Error> {
+    from_base64_raw(dst.as_mut_ptr(), dst.len(), src)
+}
+
+fn from_base64_raw(dst: *mut u8, dst_len: usize, src: &[u8]) -> Result<(usize, usize), Error> {
     if src.len() < crate::base64::MIN_DECODE_LEN {
         // As in the encoder, keep both lookup and generalized prefix state out
         // of inputs too short for this architecture's smallest vector.
-        return from_base64_scalar(dst, src);
+        return from_base64_scalar(dst, dst_len, src);
     }
     let backend = crate::base64::base64_backend();
     // SAFETY: as in `to_base64`, detection proves the feature contract.
-    unsafe { from_base64_with_backend(dst, src, backend) }
+    unsafe { from_base64_with_backend_raw(dst, dst_len, src, backend) }
 }
 
 /// The original reference-C loop, kept whole for the scalar and short-input
 /// paths just like [`to_base64_scalar`].
+///
+/// Writes only; `dst` may be uninitialized spare capacity.
 #[inline(always)]
-fn from_base64_scalar(dst: &mut [u8], src: &[u8]) -> Result<(usize, usize), Error> {
+fn from_base64_scalar(dst: *mut u8, dst_len: usize, src: &[u8]) -> Result<(usize, usize), Error> {
     let mut consumed = 0usize;
     let mut len = 0usize;
     let mut acc: u32 = 0;
@@ -531,10 +570,13 @@ fn from_base64_scalar(dst: &mut [u8], src: &[u8]) -> Result<(usize, usize), Erro
         acc_len += 6;
         if acc_len >= 8 {
             acc_len -= 8;
-            if len >= dst.len() {
+            if len >= dst_len {
                 return Err(Error::DecodingFail);
             }
-            dst[len] = ((acc >> acc_len) & 0xFF) as u8;
+            // SAFETY: `len < dst_len`.
+            unsafe {
+                dst.add(len).write(((acc >> acc_len) & 0xFF) as u8);
+            }
             len += 1;
         }
     }
@@ -561,13 +603,24 @@ pub unsafe fn from_base64_with_backend(
     src: &[u8],
     backend: Base64Backend,
 ) -> Result<(usize, usize), Error> {
+    // SAFETY: `dst` is a live slice; the backend contract is the caller's.
+    unsafe { from_base64_with_backend_raw(dst.as_mut_ptr(), dst.len(), src, backend) }
+}
+
+unsafe fn from_base64_with_backend_raw(
+    dst: *mut u8,
+    dst_len: usize,
+    src: &[u8],
+    backend: Base64Backend,
+) -> Result<(usize, usize), Error> {
     if backend == Base64Backend::Scalar {
-        return from_base64_scalar(dst, src);
+        return from_base64_scalar(dst, dst_len, src);
     }
 
     // SAFETY: transferred from this function's caller. Each backend checks the
     // supplied slice lengths before loading or storing a complete block.
-    let (mut consumed, mut len) = unsafe { crate::base64::decode_prefix(backend, dst, src) };
+    let (mut consumed, mut len) =
+        unsafe { crate::base64::decode_prefix(backend, dst, dst_len, src) };
     let mut acc: u32 = 0;
     let mut acc_len: u32 = 0;
 
@@ -589,10 +642,13 @@ pub unsafe fn from_base64_with_backend(
             acc_len -= 8;
             // The C is `if ((len++) >= *dst_len) return NULL;`, i.e. the test
             // uses the pre-increment value.
-            if len >= dst.len() {
+            if len >= dst_len {
                 return Err(Error::DecodingFail);
             }
-            dst[len] = ((acc >> acc_len) & 0xFF) as u8;
+            // SAFETY: `len < dst_len`.
+            unsafe {
+                dst.add(len).write(((acc >> acc_len) & 0xFF) as u8);
+            }
             len += 1;
         }
     }
@@ -604,6 +660,67 @@ pub unsafe fn from_base64_with_backend(
     }
 
     Ok((len, consumed))
+}
+
+/// Encode `src` as unpadded standard Base64, the alphabet PHC strings use.
+///
+/// Same dispatch as [`to_base64`]: SIMD when `src` is at least one vector
+/// long (16 bytes on x86, 24 on aarch64), scalar below that.
+///
+/// ```
+/// use argon2_rust::encode_base64;
+///
+/// assert_eq!(encode_base64(b"somesalt")?, "c29tZXNhbHQ");
+/// # Ok::<(), argon2_rust::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// [`Error::MemoryAllocationError`] if the output buffer cannot be allocated.
+pub fn encode_base64(src: &[u8]) -> Result<String, Error> {
+    // `to_base64` requires `dst_len > olen` (the C writes a NUL).
+    let cap = b64_len_usize(src.len()) + 1;
+    let mut buf = reserve_vec(cap)?;
+    let written = to_base64_raw(buf.as_mut_ptr(), cap, src)?;
+    // SAFETY: `to_base64_raw` wrote `written` bytes of the Base64 alphabet.
+    unsafe {
+        buf.set_len(written);
+    }
+    Ok(ascii_to_string(buf))
+}
+
+/// Decode unpadded standard Base64, the alphabet PHC strings use.
+///
+/// Same dispatch as [`from_base64`]. The whole of `src` must be alphabet
+/// characters; leftover junk is [`Error::DecodingFail`], unlike the C's
+/// `from_base64`, which stops at the first non-alphabet byte and leaves the
+/// tail for the caller. PHC fields have no tail.
+///
+/// ```
+/// use argon2_rust::decode_base64;
+///
+/// assert_eq!(decode_base64(b"c29tZXNhbHQ")?, b"somesalt");
+/// # Ok::<(), argon2_rust::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// [`Error::DecodingFail`] if `src` is not entirely valid unpadded Base64, or
+/// [`Error::MemoryAllocationError`] if the output buffer cannot be allocated.
+pub fn decode_base64(src: &[u8]) -> Result<Vec<u8>, Error> {
+    // Isolated PHC fields are all alphabet; `n * 3 / 4` is exact for every
+    // valid unpadded length and is the most a valid decode can write.
+    let cap = src.len() * 3 / 4;
+    let mut buf = reserve_vec(cap)?;
+    let (written, consumed) = from_base64_raw(buf.as_mut_ptr(), cap, src)?;
+    if consumed != src.len() {
+        return Err(Error::DecodingFail);
+    }
+    // SAFETY: `from_base64_raw` wrote `written` bytes and `written <= cap`.
+    unsafe {
+        buf.set_len(written);
+    }
+    Ok(buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -657,21 +774,27 @@ fn decode_decimal(src: &[u8]) -> Option<(u64, usize)> {
 
 /// The C's `SS`/`SX`/`SB` macros: a cursor that always keeps one byte spare for
 /// the NUL terminator the C writes, so the capacity requirement is identical.
-struct Writer<'a> {
-    dst: &'a mut [u8],
+struct Writer {
+    dst: *mut u8,
+    dst_len: usize,
     pos: usize,
 }
 
-impl Writer<'_> {
+impl Writer {
     /// `SS(str)`: `if (pp_len >= dst_len) return ARGON2_ENCODING_FAIL;`.
     fn put(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        let remaining = self.dst.len() - self.pos;
+        let remaining = self.dst_len - self.pos;
         if bytes.len() >= remaining {
             return Err(Error::EncodingFail);
         }
-        let end = self.pos + bytes.len();
-        self.dst[self.pos..end].copy_from_slice(bytes);
-        self.pos = end;
+        // SAFETY: the capacity check leaves room for `bytes`, and this write
+        // does not read the destination.
+        unsafe {
+            self.dst
+                .add(self.pos)
+                .copy_from_nonoverlapping(bytes.as_ptr(), bytes.len());
+        }
+        self.pos += bytes.len();
         Ok(())
     }
 
@@ -694,7 +817,12 @@ impl Writer<'_> {
 
     /// `SB(buf, len)`: base64, which does its own capacity check.
     fn put_base64(&mut self, src: &[u8]) -> Result<(), Error> {
-        let written = to_base64(&mut self.dst[self.pos..], src)?;
+        // SAFETY: `self.pos <= self.dst_len`; `to_base64_raw` only writes.
+        let written = to_base64_raw(
+            unsafe { self.dst.add(self.pos) },
+            self.dst_len - self.pos,
+            src,
+        )?;
         self.pos += written;
         Ok(())
     }
@@ -746,9 +874,25 @@ pub fn encode_string(
     salt: &[u8],
     hash: &[u8],
 ) -> Result<usize, Error> {
+    encode_string_raw(dst.as_mut_ptr(), dst.len(), algorithm, version, params, salt, hash)
+}
+
+fn encode_string_raw(
+    dst: *mut u8,
+    dst_len: usize,
+    algorithm: Algorithm,
+    version: Version,
+    params: &Params,
+    salt: &[u8],
+    hash: &[u8],
+) -> Result<usize, Error> {
     validate_for_string(params, salt.len(), hash.len())?;
 
-    let mut w = Writer { dst, pos: 0 };
+    let mut w = Writer {
+        dst,
+        dst_len,
+        pos: 0,
+    };
 
     w.put(b"$")?;
     w.put(algorithm.as_str().as_bytes())?;
@@ -798,24 +942,38 @@ pub fn encode_string_alloc(
         hash.len(),
     );
 
-    let mut buf = alloc_zeroed_vec(capacity)?;
-    let written = encode_string(&mut buf, algorithm, version, params, salt, hash)?;
-    buf.truncate(written);
-
-    // Every byte written comes from the base64 alphabet, the decimal digits or
-    // the ASCII punctuation above, so this is always valid UTF-8.
-    String::from_utf8(buf).map_err(|_| Error::EncodingFail)
+    let mut buf = reserve_vec(capacity)?;
+    let written = encode_string_raw(
+        buf.as_mut_ptr(),
+        capacity,
+        algorithm,
+        version,
+        params,
+        salt,
+        hash,
+    )?;
+    // SAFETY: `encode_string` wrote `written` ASCII bytes.
+    unsafe {
+        buf.set_len(written);
+    }
+    Ok(ascii_to_string(buf))
 }
 
-/// A zeroed `Vec<u8>` of `len` bytes, without the abort-on-OOM of
-/// `Vec::with_capacity`.
-fn alloc_zeroed_vec(len: usize) -> Result<Vec<u8>, Error> {
+/// Spare capacity only — len stays 0 until the caller writes and `set_len`s.
+fn reserve_vec(cap: usize) -> Result<Vec<u8>, Error> {
     let mut v = Vec::new();
-    v.try_reserve(len)
-        .map_err(|_| Error::MemoryAllocationError)?;
-    // Cannot reallocate: the capacity was just reserved.
-    v.resize(len, 0);
+    if cap != 0 {
+        v.try_reserve_exact(cap)
+            .map_err(|_| Error::MemoryAllocationError)?;
+    }
     Ok(v)
+}
+
+/// The PHC alphabet and punctuation are ASCII.
+fn ascii_to_string(buf: Vec<u8>) -> String {
+    // SAFETY: every byte came from `b64_byte_to_char`, a decimal digit, or a
+    // `$` / `v` / `m` / `t` / `p` / `=` / `,` literal.
+    unsafe { String::from_utf8_unchecked(buf) }
 }
 
 // ---------------------------------------------------------------------------
@@ -825,8 +983,10 @@ fn alloc_zeroed_vec(len: usize) -> Result<Vec<u8>, Error> {
 /// The fields a PHC string yields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decoded {
-    /// The algorithm named by the string. Always equal to the one requested,
-    /// since a mismatch is a decoding failure.
+    /// The algorithm named by the string.
+    ///
+    /// [`decode_string`] requires the caller to pass this type and fails on a
+    /// mismatch. [`decode_phc`] reads it from the `$argon2*` prefix.
     pub algorithm: Algorithm,
     /// The version. `0x10` when the `$v=` field is absent.
     pub version: Version,
@@ -837,6 +997,12 @@ pub struct Decoded {
     pub salt: Vec<u8>,
     /// The decoded tag.
     pub hash: Vec<u8>,
+    /// Associated data from a `data=` parameter, if the string had one.
+    ///
+    /// The C `decode_string` has no such field; [`decode_string`] always
+    /// leaves this empty. [`decode_phc`] fills it for `@phc/format` /
+    /// node-argon2 strings.
+    pub ad: Vec<u8>,
 }
 
 /// The remainder of `src` from `pos`, never panicking.
@@ -887,13 +1053,16 @@ fn decode_bin(src: &[u8], pos: &mut usize) -> Result<Vec<u8>, Error> {
     // upper bound for every `n`, and cannot overflow for any real slice.
     let max_len = tail.len() / 4 * 3 + 3;
 
-    let mut buf = alloc_zeroed_vec(max_len)?;
-    let (written, consumed) = from_base64(&mut buf, tail)?;
+    let mut buf = reserve_vec(max_len)?;
+    let (written, consumed) = from_base64_raw(buf.as_mut_ptr(), max_len, tail)?;
     // `bin_len > UINT32_MAX` is a decoding failure in the C.
     if written > u32::MAX as usize {
         return Err(Error::DecodingFail);
     }
-    buf.truncate(written);
+    // SAFETY: `from_base64_raw` wrote `written` bytes and `written <= max_len`.
+    unsafe {
+        buf.set_len(written);
+    }
     *pos += consumed;
     Ok(buf)
 }
@@ -1002,7 +1171,165 @@ pub fn decode_string(encoded: &str, algorithm: Algorithm) -> Result<Decoded, Err
         params,
         salt,
         hash,
+        ad: Vec::new(),
     })
+}
+
+/// Decode a PHC string, detecting the algorithm from the `$argon2*` prefix.
+///
+/// Unlike [`decode_string`] (C `decode_string`, fixed `$m=,t=,p=`), this
+/// accepts:
+///
+/// * any order of `m`, `t`, `p`
+/// * an optional `data=` associated-data field (node-argon2 / `@phc/format`)
+/// * unknown keys such as `keyid` (ignored)
+///
+/// `$v=` is still optional and still defaults to version 16.
+///
+/// The C-style encoder ([`encode_string`], [`crate::Argon2::hash_encoded`]) never
+/// writes `data=`. This decoder exists so a verifier can still honour strings
+/// other producers emit.
+///
+/// ```
+/// use argon2_rust::{Algorithm, decode_phc};
+///
+/// // node-argon2 / `@phc/format` write `m,p,t`.
+/// let d = decode_phc(
+///     "$argon2id$v=19$m=64,p=1,t=1$c29tZXNhbHQ$cpx6VEQbwTVZvcpxNIxOVUWZ5xnAipUmAe1cg2GMG70",
+/// )?;
+/// assert_eq!(d.algorithm, Algorithm::Argon2id);
+/// assert_eq!(d.params.memory_kib(), 64);
+/// assert_eq!(d.params.passes(), 1);
+/// assert_eq!(d.salt, b"somesalt");
+/// assert!(d.ad.is_empty());
+/// # Ok::<(), argon2_rust::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// [`Error::DecodingFail`] for a malformed string, or whatever
+/// [`crate::params::validate_inputs`] returns.
+pub fn decode_phc(encoded: &str) -> Result<Decoded, Error> {
+    let src = encoded.as_bytes();
+    if src.len() > u32::MAX as usize {
+        return Err(Error::DecodingFail);
+    }
+    let mut pos = 0usize;
+
+    expect(src, &mut pos, b"$")?;
+    let algorithm = if expect_opt(src, &mut pos, b"argon2id") {
+        Algorithm::Argon2id
+    } else if expect_opt(src, &mut pos, b"argon2i") {
+        Algorithm::Argon2i
+    } else if expect_opt(src, &mut pos, b"argon2d") {
+        Algorithm::Argon2d
+    } else {
+        return Err(Error::DecodingFail);
+    };
+
+    let mut version_value = Version::V0x10.as_u32();
+    if expect_opt(src, &mut pos, b"$v=") {
+        version_value = decimal_u32(src, &mut pos)?;
+    }
+
+    expect(src, &mut pos, b"$")?;
+    let param_end = find_byte(rest(src, pos), b'$').ok_or(Error::DecodingFail)?;
+    let param_bytes = rest(src, pos).get(..param_end).unwrap_or(&[]);
+    let (m_cost, t_cost, lanes, ad) = parse_phc_params(param_bytes)?;
+    pos += param_end;
+
+    // Isolate each Base64 field so the SIMD decoder sees a clean alphabet
+    // run. Feeding it `salt$hash` puts `$` in the first vector and the
+    // prefix falls back to scalar.
+    expect(src, &mut pos, b"$")?;
+    let salt_end = find_byte(rest(src, pos), b'$').ok_or(Error::DecodingFail)?;
+    let salt = decode_base64(&rest(src, pos)[..salt_end])?;
+    pos += salt_end;
+
+    expect(src, &mut pos, b"$")?;
+    // `decode_base64` requires the tail to be entirely alphabet, which is
+    // the trailing-junk check `decode_string` does with `pos != src.len()`.
+    let hash = decode_base64(rest(src, pos))?;
+
+    validate_inputs(
+        hash.len(),
+        0,
+        salt.len(),
+        0,
+        ad.len(),
+        m_cost,
+        t_cost,
+        lanes,
+        lanes,
+    )?;
+
+    let version = Version::from_u32(version_value).ok_or(Error::DecodingFail)?;
+    let params = Params::builder()
+        .memory(Memory::kib(u64::from(m_cost)))
+        .passes(t_cost)
+        .lanes(lanes)
+        .threads(lanes)
+        .tag_len(TagLen::bytes(hash.len() as u64))
+        .build()?;
+
+    Ok(Decoded {
+        algorithm,
+        version,
+        params,
+        salt,
+        hash,
+        ad,
+    })
+}
+
+fn parse_phc_params(src: &[u8]) -> Result<(u32, u32, u32, Vec<u8>), Error> {
+    let mut memory = None;
+    let mut passes = None;
+    let mut lanes = None;
+    let mut ad = Vec::new();
+    let mut rest = src;
+    if rest.is_empty() {
+        return Err(Error::DecodingFail);
+    }
+    loop {
+        let (field, next) = match find_byte(rest, b',') {
+            Some(i) => (&rest[..i], &rest[i + 1..]),
+            None => (rest, [].as_slice()),
+        };
+        let eq = find_byte(field, b'=').ok_or(Error::DecodingFail)?;
+        let key = &field[..eq];
+        let value = &field[eq + 1..];
+        match key {
+            b"m" => memory = Some(parse_param_u32(value)?),
+            b"t" => passes = Some(parse_param_u32(value)?),
+            b"p" => lanes = Some(parse_param_u32(value)?),
+            b"data" => ad = decode_base64(value)?,
+            _ => {}
+        }
+        if next.is_empty() {
+            break;
+        }
+        rest = next;
+    }
+    match (memory, passes, lanes) {
+        (Some(m), Some(t), Some(p)) => Ok((m, t, p, ad)),
+        _ => Err(Error::DecodingFail),
+    }
+}
+
+fn parse_param_u32(src: &[u8]) -> Result<u32, Error> {
+    let (value, consumed) = decode_decimal(src).ok_or(Error::DecodingFail)?;
+    if consumed != src.len() || value > u64::from(u32::MAX) {
+        return Err(Error::DecodingFail);
+    }
+    Ok(value as u32)
+}
+
+/// First index of `needle`. Delegates to [`memchr`], which has its own
+/// runtime SIMD cascade when this crate's `std` feature is on.
+#[inline]
+fn find_byte(haystack: &[u8], needle: u8) -> Option<usize> {
+    memchr::memchr(needle, haystack)
 }
 
 #[cfg(test)]
@@ -1063,6 +1390,42 @@ mod tests {
     }
 
     // -- lengths ------------------------------------------------------------
+
+    #[test]
+    fn encode_base64_matches_known_and_round_trips() {
+        assert_eq!(encode_base64(b"somesalt").unwrap(), "c29tZXNhbHQ");
+        assert_eq!(decode_base64(b"c29tZXNhbHQ").unwrap(), b"somesalt");
+        for n in [0usize, 1, 2, 8, 16, 24, 32, 48] {
+            let src: Vec<u8> = (0..n).map(|i| i as u8).collect();
+            let encoded = encode_base64(&src).unwrap();
+            assert_eq!(decode_base64(encoded.as_bytes()).unwrap(), src, "n={n}");
+        }
+    }
+
+    #[test]
+    fn decode_base64_rejects_junk_and_bad_length() {
+        assert_eq!(decode_base64(b"A"), Err(Error::DecodingFail));
+        assert_eq!(decode_base64(b"????"), Err(Error::DecodingFail));
+        assert_eq!(decode_base64(b"c29tZXNhbHQ!"), Err(Error::DecodingFail));
+    }
+
+    #[test]
+    fn find_byte_matches_iterator_position() {
+        for n in [0usize, 1, 15, 16, 17, 31, 32, 64, 80] {
+            let mut src = vec![b'A'; n];
+            assert_eq!(find_byte(&src, b'$'), None, "n={n} miss");
+            if n == 0 {
+                continue;
+            }
+            src[n / 2] = b'$';
+            assert_eq!(find_byte(&src, b'$'), Some(n / 2), "n={n} mid");
+            src[n / 2] = b'A';
+            src[n - 1] = b'$';
+            assert_eq!(find_byte(&src, b'$'), Some(n - 1), "n={n} last");
+            src[0] = b'$';
+            assert_eq!(find_byte(&src, b'$'), Some(0), "n={n} first");
+        }
+    }
 
     #[test]
     fn b64_len_matches_c() {
@@ -1685,6 +2048,7 @@ mod tests {
         assert_eq!(d.params.lanes(), 1);
         assert_eq!(d.params.tag_len_bytes(), 32);
         assert_eq!(d.salt, b"somesalt");
+        assert!(d.ad.is_empty());
         assert_eq!(
             d.hash,
             unb64(b"wWKIMhR9lyDFvRz9YTZweHKfbftvj+qf+YFY4NeBbtA").unwrap()
@@ -1706,6 +2070,61 @@ mod tests {
         let d = decode_string(s, Algorithm::Argon2id).unwrap();
         assert_eq!(d.params.lanes(), 4);
         assert_eq!(d.params.threads(), 4);
+        assert!(d.ad.is_empty());
+    }
+
+    #[test]
+    fn decode_phc_accepts_c_strings_and_detects_the_algorithm() {
+        let d = decode_phc(V13_ARGON2ID).unwrap();
+        let c = decode_string(V13_ARGON2ID, Algorithm::Argon2id).unwrap();
+        assert_eq!(d, c);
+        assert!(d.ad.is_empty());
+        assert_eq!(decode_phc(V13_ARGON2I).unwrap().algorithm, Algorithm::Argon2i);
+        assert_eq!(decode_phc(V10_ARGON2I).unwrap().version, Version::V0x10);
+    }
+
+    #[test]
+    fn decode_phc_accepts_m_p_t_order_and_unknown_keys() {
+        let reordered = "$argon2id$v=19$m=65536,p=1,t=2$c29tZXNhbHQ\
+                         $CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc";
+        let d = decode_phc(reordered).unwrap();
+        assert_eq!(d.params.memory_kib(), 65536);
+        assert_eq!(d.params.passes(), 2);
+        assert_eq!(d.params.lanes(), 1);
+        assert_eq!(d.salt, b"somesalt");
+        assert!(d.ad.is_empty());
+
+        let with_keyid = "$argon2id$v=19$m=65536,t=2,p=1,keyid=abc$c29tZXNhbHQ\
+                          $CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc";
+        let k = decode_phc(with_keyid).unwrap();
+        assert_eq!(k.hash, d.hash);
+        assert!(k.ad.is_empty());
+
+        // C-strict decoder still requires `$m=,t=,p=`.
+        assert_eq!(
+            decode_string(reordered, Algorithm::Argon2id),
+            Err(Error::DecodingFail)
+        );
+    }
+
+    #[test]
+    fn decode_phc_reads_data_associated_data() {
+        let encoded = "$argon2id$v=19$m=65536,t=2,p=1,data=c29tZXNhbHQ$c29tZXNhbHQ\
+                       $CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc";
+        let d = decode_phc(encoded).unwrap();
+        assert_eq!(d.ad, b"somesalt");
+        assert_eq!(d.salt, b"somesalt");
+        assert_eq!(decode_string(encoded, Algorithm::Argon2id), Err(Error::DecodingFail));
+    }
+
+    #[test]
+    fn decode_phc_rejects_missing_required_params() {
+        assert_eq!(
+            decode_phc("$argon2id$v=19$m=65536,t=2$c29tZXNhbHQ$AAAA"),
+            Err(Error::DecodingFail)
+        );
+        assert_eq!(decode_phc("$argon2x$v=19$m=8,t=1,p=1$c29tZXNhbHQ$AAAA"), Err(Error::DecodingFail));
+        assert_eq!(decode_phc("argon2id$v=19$m=8,t=1,p=1$c29tZXNhbHQ$AAAA"), Err(Error::DecodingFail));
     }
 
     #[test]
@@ -1727,6 +2146,7 @@ mod tests {
                     let d = decode_string(&encoded, algorithm).unwrap();
                     assert_eq!(d.algorithm, algorithm);
                     assert_eq!(d.version, version);
+                    assert!(d.ad.is_empty());
                     assert_eq!(d.params, params);
                     assert_eq!(d.salt, salt);
                     assert_eq!(d.hash, tag);

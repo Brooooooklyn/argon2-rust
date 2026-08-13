@@ -55,11 +55,22 @@
 //! vector kernels follow `base64-simd`/`aklomp/base64`, while inputs shorter
 //! than one vector stay on the original scalar loop. As in `base64-simd`,
 //! AVX-512-capable CPUs use this codec's AVX2 path; the wider backend remains
-//! specific to the Argon2 compression function above.
+//! specific to the Argon2 compression function above. Call [`encode_base64`]
+//! and [`decode_base64`] for that codec on its own; [`detected_base64_backend`]
+//! reports which implementation this CPU picked. The PHC string itself is
+//! [`encode_string`] / [`decode_string`] (C `encode_string` / `decode_string`)
+//! or [`decode_phc`] when the input may be a `@phc/format` / node-argon2
+//! string (`m,p,t` any order, optional `data=`).
+//!
+//! BLAKE2b (H0, the long expansion, and finalize) has its own cascade, x86
+//! only: AVX-512 → AVX2 → SSE4.1 → scalar. AArch64 stays on scalar; a NEON
+//! compress was measured slower. [`blake2b`] / [`blake2b_long`] are the
+//! one-shot entry points; [`detected_blake2b_backend`] reports the choice.
 //!
 //! # Features
 //!
-//! * `std` *(default)* — runtime CPU feature detection.
+//! * `std` *(default)* — runtime CPU feature detection, including
+//!   `memchr`'s SIMD cascade for PHC field scans.
 //! * `parallel` *(default, implies `std`)* — multi-threaded fill. One
 //!   [`std::thread::scope`] for the **whole** fill, whose workers meet at a
 //!   barrier at each of the `4 * t_cost` algorithmic sync points, rather than a
@@ -74,9 +85,9 @@
 //!   or 0.00013% of an RFC 9106 hash.
 //! * `internal-api` — exposes `__internal` for tests and benches. Not stable.
 //!
-//! The crate is `#![no_std]` and needs only `alloc`; that stays true with every
-//! feature turned on. Without `std`, backend selection falls back to
-//! compile-time `target_feature` cfgs.
+//! The crate is `#![no_std]` and needs `alloc` plus [`memchr`]. That stays
+//! true with every feature turned on. Without `std`, backend selection (and
+//! `memchr`) fall back to compile-time `target_feature` cfgs.
 //!
 //! # Not a `password-hash` provider
 //!
@@ -236,13 +247,18 @@ private_modules!(base64, blake2b, block, core, encoding, fill_block, memory);
 #[cfg(feature = "std")]
 mod random;
 
-pub use crate::core::{Argon2, BOUNDED_MAX_SALT_LEN, Hasher};
+pub use crate::core::{Argon2, BOUNDED_MAX_SALT_LEN, Hasher, constant_time_eq};
 // `RANDOM_SALT_LEN` is std-only because the API it describes is;
 // `BOUNDED_MAX_SALT_LEN` is not, because `verify_encoded_bounded` works without
 // `std` and a caller has to be able to name the bound it is being held to.
+pub use crate::base64::Base64Backend;
+pub use crate::blake2b::{Blake2bBackend, blake2b, blake2b_long};
 #[cfg(feature = "std")]
 pub use crate::core::RANDOM_SALT_LEN;
-pub use crate::encoding::encoded_len;
+pub use crate::encoding::{
+    Decoded, decode_base64, decode_phc, decode_string, encode_base64, encode_string,
+    encode_string_alloc, encoded_len, from_base64, to_base64,
+};
 pub use crate::error::Error;
 pub use crate::fill_block::Backend;
 pub use crate::params::{Algorithm, Params, Version};
@@ -258,6 +274,36 @@ pub use crate::params::{Algorithm, Params, Version};
 #[must_use]
 pub fn detected_backend() -> Backend {
     crate::fill_block::backend()
+}
+
+/// The Base64 [`Base64Backend`] this CPU resolved to, cached after the first call.
+///
+/// Diagnostic only — [`encode_base64`] and [`decode_base64`] call this for you.
+///
+/// ```
+/// println!("argon2 base64 backend: {}", argon2_rust::detected_base64_backend());
+/// ```
+#[inline]
+#[must_use]
+pub fn detected_base64_backend() -> Base64Backend {
+    crate::base64::base64_backend()
+}
+
+/// The BLAKE2b [`Blake2bBackend`] this CPU resolved to, cached after the first
+/// call.
+///
+/// Diagnostic only — [`blake2b`], [`blake2b_long`], and every Argon2 hash call
+/// this for you. On aarch64 this is always [`Blake2bBackend::Scalar`]: a NEON
+/// compress was measured slower than the portable path, so there is no ARM
+/// SIMD backend to pick.
+///
+/// ```
+/// println!("argon2 blake2b backend: {}", argon2_rust::detected_blake2b_backend());
+/// ```
+#[inline]
+#[must_use]
+pub fn detected_blake2b_backend() -> Blake2bBackend {
+    crate::blake2b::blake2b_backend()
 }
 
 /// Unstable internals, exposed for this crate's own tests and benches.
@@ -299,8 +345,9 @@ pub mod __internal {
         initial_hash,
     };
     pub use crate::encoding::{
-        Decoded, b64_len, decode_string, encode_string, encode_string_alloc, encoded_len,
-        from_base64, from_base64_with_backend, num_len, to_base64, to_base64_with_backend,
+        Decoded, b64_len, decode_phc, decode_string, encode_string, encode_string_alloc,
+        encoded_len, from_base64, from_base64_with_backend, num_len, to_base64,
+        to_base64_with_backend,
     };
     pub use crate::fill_block::{Backend, FillSegmentFn, backend, detect, fill_segment_fn};
     /// The arena release-path observation point, for

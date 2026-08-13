@@ -257,7 +257,7 @@ pub const MIN_DECODE_LEN: usize = usize::MAX;
 #[inline]
 pub unsafe fn encode_prefix(
     backend: Base64Backend,
-    dst: &mut [u8],
+    dst: *mut u8,
     src: &[u8],
 ) -> (usize, usize) {
     #[cfg(not(any(
@@ -266,7 +266,7 @@ pub unsafe fn encode_prefix(
         target_arch = "x86_64",
         all(target_arch = "wasm32", target_feature = "simd128")
     )))]
-    let _ = (&mut *dst, src);
+    let _ = (dst, src);
 
     match backend {
         Base64Backend::Scalar => (0, 0),
@@ -274,33 +274,27 @@ pub unsafe fn encode_prefix(
         #[cfg(target_arch = "aarch64")]
         // SAFETY: transferred from this function's caller; the slice pointers
         // and lengths are passed together without alteration.
-        Base64Backend::Neon => unsafe { neon::encode(dst.as_mut_ptr(), src.as_ptr(), src.len()) },
+        Base64Backend::Neon => unsafe { neon::encode(dst, src.as_ptr(), src.len()) },
         #[cfg(not(target_arch = "aarch64"))]
         Base64Backend::Neon => (0, 0),
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         // SAFETY: transferred from this function's caller; the slices supply
         // the pointer/length pairs unchanged.
-        Base64Backend::Ssse3 => unsafe {
-            x86::encode_ssse3(dst.as_mut_ptr(), src.as_ptr(), src.len())
-        },
+        Base64Backend::Ssse3 => unsafe { x86::encode_ssse3(dst, src.as_ptr(), src.len()) },
         #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         Base64Backend::Ssse3 => (0, 0),
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         // SAFETY: as above; the backend contract includes AVX2 and SSSE3.
-        Base64Backend::Avx2 => unsafe {
-            x86::encode_avx2(dst.as_mut_ptr(), src.as_ptr(), src.len())
-        },
+        Base64Backend::Avx2 => unsafe { x86::encode_avx2(dst, src.as_ptr(), src.len()) },
         #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         Base64Backend::Avx2 => (0, 0),
 
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         // SAFETY: the module only exists under the compile-time SIMD128
         // contract, and the slices supply both pointer bounds.
-        Base64Backend::Wasm128 => unsafe {
-            wasm128::encode(dst.as_mut_ptr(), src.as_ptr(), src.len())
-        },
+        Base64Backend::Wasm128 => unsafe { wasm128::encode(dst, src.as_ptr(), src.len()) },
         #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
         Base64Backend::Wasm128 => (0, 0),
     }
@@ -317,7 +311,8 @@ pub unsafe fn encode_prefix(
 #[inline]
 pub unsafe fn decode_prefix(
     backend: Base64Backend,
-    dst: &mut [u8],
+    dst: *mut u8,
+    dst_len: usize,
     src: &[u8],
 ) -> (usize, usize) {
     #[cfg(not(any(
@@ -326,7 +321,7 @@ pub unsafe fn decode_prefix(
         target_arch = "x86_64",
         all(target_arch = "wasm32", target_feature = "simd128")
     )))]
-    let _ = (&mut *dst, src);
+    let _ = (dst, dst_len, src);
 
     match backend {
         Base64Backend::Scalar => (0, 0),
@@ -334,26 +329,20 @@ pub unsafe fn decode_prefix(
         #[cfg(target_arch = "aarch64")]
         // SAFETY: transferred from this function's caller; both pointer/length
         // pairs come directly from live slices.
-        Base64Backend::Neon => unsafe {
-            neon::decode(dst.as_mut_ptr(), dst.len(), src.as_ptr(), src.len())
-        },
+        Base64Backend::Neon => unsafe { neon::decode(dst, dst_len, src.as_ptr(), src.len()) },
         #[cfg(not(target_arch = "aarch64"))]
         Base64Backend::Neon => (0, 0),
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         // SAFETY: transferred from this function's caller; both pointer/length
         // pairs come directly from live slices.
-        Base64Backend::Ssse3 => unsafe {
-            x86::decode_ssse3(dst.as_mut_ptr(), dst.len(), src.as_ptr(), src.len())
-        },
+        Base64Backend::Ssse3 => unsafe { x86::decode_ssse3(dst, dst_len, src.as_ptr(), src.len()) },
         #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         Base64Backend::Ssse3 => (0, 0),
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         // SAFETY: as above; the backend contract includes AVX2 and SSSE3.
-        Base64Backend::Avx2 => unsafe {
-            x86::decode_avx2(dst.as_mut_ptr(), dst.len(), src.as_ptr(), src.len())
-        },
+        Base64Backend::Avx2 => unsafe { x86::decode_avx2(dst, dst_len, src.as_ptr(), src.len()) },
         #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         Base64Backend::Avx2 => (0, 0),
 
@@ -361,7 +350,7 @@ pub unsafe fn decode_prefix(
         // SAFETY: the module only exists under the compile-time SIMD128
         // contract, and both pointer/length pairs come from live slices.
         Base64Backend::Wasm128 => unsafe {
-            wasm128::decode(dst.as_mut_ptr(), dst.len(), src.as_ptr(), src.len())
+            wasm128::decode(dst, dst_len, src.as_ptr(), src.len())
         },
         #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
         Base64Backend::Wasm128 => (0, 0),

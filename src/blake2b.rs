@@ -221,6 +221,12 @@ impl Blake2bBackend {
     }
 }
 
+impl core::fmt::Display for Blake2bBackend {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 #[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
 fn have_sse41() -> bool {
     std::arch::is_x86_feature_detected!("sse4.1")
@@ -723,7 +729,8 @@ impl Drop for Blake2b {
 ///
 /// # Errors
 ///
-/// [`Error::IncorrectParameter`] if `out.len()` is 0 or greater than [`OUTBYTES`].
+/// [`Error::IncorrectParameter`] if `out.len()` is 0 or greater than 64
+/// (BLAKE2b's digest size).
 pub fn blake2b(out: &mut [u8], input: &[u8]) -> Result<(), Error> {
     let backend = blake2b_backend();
     // SAFETY: `blake2b_backend` only returns a backend available on this CPU.

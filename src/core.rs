@@ -1231,8 +1231,8 @@ impl Argon2 {
 
     /// Derive a tag into `out`, with a secret key and associated data.
     ///
-    /// No PHC-emitting entry point accepts either; see the "Secret and
-    /// associated data" section of [`Argon2::hash_encoded`].
+    /// For a C-style PHC string of a peppered tag, see
+    /// [`Argon2::hash_encoded_with_ad`].
     ///
     /// # Errors
     ///
@@ -1290,8 +1290,23 @@ impl Argon2 {
     ///
     /// As [`Argon2::hash_into`].
     pub fn hash(&self, pwd: &[u8], salt: &[u8]) -> Result<Vec<u8>, Error> {
+        self.hash_with_ad(pwd, salt, &[], &[])
+    }
+
+    /// [`Argon2::hash`] with a secret key and associated data.
+    ///
+    /// # Errors
+    ///
+    /// As [`Argon2::hash_into`].
+    pub fn hash_with_ad(
+        &self,
+        pwd: &[u8],
+        salt: &[u8],
+        secret: &[u8],
+        ad: &[u8],
+    ) -> Result<Vec<u8>, Error> {
         let mut out = try_zeroed_vec(self.params.tag_len_bytes())?;
-        self.hash_into(pwd, salt, &mut out)?;
+        self.hash_into_with_ad(pwd, salt, secret, ad, &mut out)?;
         Ok(out)
     }
 
@@ -1302,21 +1317,76 @@ impl Argon2 {
     ///
     /// # Secret and associated data
     ///
-    /// No PHC-emitting entry point takes a `secret` (pepper) or `ad`, because a
-    /// PHC string has a field for neither: `argon2_hash()` (`argon2.h:322`)
-    /// hardcodes `context.secret = NULL; context.ad = NULL` (`argon2.c:139-142`)
-    /// and `encode_string` emits only `$type$v=$m=,t=,p=$salt$hash`. A peppered
-    /// deployment must call [`Argon2::hash_into_with_ad`] and encode the tag
-    /// itself — `mod encoding` is private, so that means the PHC layout and
-    /// unpadded Base64 by hand. Its string is indistinguishable from an
-    /// unpeppered one, so [`Argon2::verify_encoded`] on it answers
-    /// [`Error::VerifyMismatch`] rather than any "missing pepper" signal.
+    /// This method never takes a `secret` (pepper) or `ad`, matching
+    /// `argon2_hash()` (`argon2.h:322`): the C hardcodes
+    /// `context.secret = NULL; context.ad = NULL` (`argon2.c:139-142`) and
+    /// `encode_string` emits only `$type$v=$m=,t=,p=$salt$hash`.
+    ///
+    /// [`Argon2::hash_encoded_with_ad`] hashes with a pepper and/or associated
+    /// data, then emits that same C-style string — it does **not** write a
+    /// `data=` field. The tag is peppered; the string is indistinguishable from
+    /// an unpeppered one. [`Argon2::verify_encoded`] on it answers
+    /// [`Error::VerifyMismatch`] rather than any "missing pepper" signal; use
+    /// [`Argon2::verify_encoded_with_ad`] with the same secret and ad.
+    ///
+    /// Foreign producers (`@phc/format`, node-argon2) may put associated data
+    /// in a `data=` parameter and may write `m`, `t`, `p` in any order. Those
+    /// strings are what [`crate::decode_phc`] reads. [`crate::decode_string`]
+    /// stays C-strict (`$m=,t=,p=` only, no `data=`).
     ///
     /// # Errors
     ///
     /// As [`Argon2::hash_into`], plus [`Error::EncodingFail`].
     pub fn hash_encoded(&self, pwd: &[u8], salt: &[u8]) -> Result<String, Error> {
-        let mut tag = self.hash(pwd, salt)?;
+        self.hash_encoded_with_ad(pwd, salt, &[], &[])
+    }
+
+    /// Derive a peppered tag and format it as a C-style PHC string.
+    ///
+    /// The secret and associated data feed the tag the same way
+    /// [`Argon2::hash_into_with_ad`] does. They are **not** written into the
+    /// string: `encode_string` has no field for either, so the result looks like
+    /// any other `$type$v=$m=,t=,p=$salt$hash` record. Bindings that must
+    /// interoperate with node-argon2 `data=` strings should hash here and
+    /// verify through [`crate::decode_phc`].
+    ///
+    /// ```
+    /// use argon2_rust::{Algorithm, Argon2, Params, Version, params::Memory};
+    ///
+    /// let params = Params::builder().memory(Memory::kib(64)).passes(1).build()?;
+    /// let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    /// let encoded = argon2.hash_encoded_with_ad(
+    ///     b"password",
+    ///     b"somesalt",
+    ///     b"pepper",
+    ///     b"ad",
+    /// )?;
+    /// assert!(encoded.starts_with("$argon2id$v=19$m=64,t=1,p=1$c29tZXNhbHQ$"));
+    /// assert!(!encoded.contains("data="));
+    /// assert_eq!(
+    ///     Argon2::verify_encoded_with_ad(
+    ///         &encoded,
+    ///         b"password",
+    ///         b"pepper",
+    ///         b"ad",
+    ///         Algorithm::Argon2id,
+    ///     ),
+    ///     Ok(()),
+    /// );
+    /// # Ok::<(), argon2_rust::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Argon2::hash_into`], plus [`Error::EncodingFail`].
+    pub fn hash_encoded_with_ad(
+        &self,
+        pwd: &[u8],
+        salt: &[u8],
+        secret: &[u8],
+        ad: &[u8],
+    ) -> Result<String, Error> {
+        let mut tag = self.hash_with_ad(pwd, salt, secret, ad)?;
         let encoded = crate::encoding::encode_string_alloc(
             self.algorithm,
             self.version,
@@ -1370,8 +1440,24 @@ impl Argon2 {
     ///
     /// As [`Argon2::hash_into`], or [`Error::VerifyMismatch`].
     pub fn verify(&self, pwd: &[u8], salt: &[u8], expected: &[u8]) -> Result<(), Error> {
+        self.verify_with_ad(pwd, salt, &[], &[], expected)
+    }
+
+    /// [`Argon2::verify`] with a secret key and associated data.
+    ///
+    /// # Errors
+    ///
+    /// As [`Argon2::hash_into`], or [`Error::VerifyMismatch`].
+    pub fn verify_with_ad(
+        &self,
+        pwd: &[u8],
+        salt: &[u8],
+        secret: &[u8],
+        ad: &[u8],
+        expected: &[u8],
+    ) -> Result<(), Error> {
         let mut computed = try_zeroed_vec(self.params.tag_len_bytes())?;
-        let result = self.hash_into(pwd, salt, &mut computed);
+        let result = self.hash_into_with_ad(pwd, salt, secret, ad, &mut computed);
         // argon2.c:349 `argon2_compare(hash, context->out, context->outlen)`.
         let matched = result.is_ok() && constant_time_eq(&computed, expected);
         clear_internal_memory(&mut computed);
@@ -2021,8 +2107,23 @@ impl Hasher {
     ///
     /// As [`Argon2::hash_into`].
     pub fn hash(&mut self, pwd: &[u8], salt: &[u8]) -> Result<Vec<u8>, Error> {
+        self.hash_with_ad(pwd, salt, &[], &[])
+    }
+
+    /// [`Argon2::hash_with_ad`], reusing the arena.
+    ///
+    /// # Errors
+    ///
+    /// As [`Argon2::hash_into`].
+    pub fn hash_with_ad(
+        &mut self,
+        pwd: &[u8],
+        salt: &[u8],
+        secret: &[u8],
+        ad: &[u8],
+    ) -> Result<Vec<u8>, Error> {
         let mut out = try_zeroed_vec(self.argon2.params.tag_len_bytes())?;
-        self.hash_into(pwd, salt, &mut out)?;
+        self.hash_into_with_ad(pwd, salt, secret, ad, &mut out)?;
         Ok(out)
     }
 
@@ -2032,8 +2133,23 @@ impl Hasher {
     ///
     /// As [`Argon2::hash_into`], plus [`Error::EncodingFail`].
     pub fn hash_encoded(&mut self, pwd: &[u8], salt: &[u8]) -> Result<String, Error> {
+        self.hash_encoded_with_ad(pwd, salt, &[], &[])
+    }
+
+    /// [`Argon2::hash_encoded_with_ad`], reusing the arena.
+    ///
+    /// # Errors
+    ///
+    /// As [`Argon2::hash_into`], plus [`Error::EncodingFail`].
+    pub fn hash_encoded_with_ad(
+        &mut self,
+        pwd: &[u8],
+        salt: &[u8],
+        secret: &[u8],
+        ad: &[u8],
+    ) -> Result<String, Error> {
         let argon2 = self.argon2;
-        let mut tag = self.hash(pwd, salt)?;
+        let mut tag = self.hash_with_ad(pwd, salt, secret, ad)?;
         let encoded = crate::encoding::encode_string_alloc(
             argon2.algorithm,
             argon2.version,
@@ -2052,8 +2168,24 @@ impl Hasher {
     ///
     /// As [`Argon2::hash_into`], or [`Error::VerifyMismatch`].
     pub fn verify(&mut self, pwd: &[u8], salt: &[u8], expected: &[u8]) -> Result<(), Error> {
+        self.verify_with_ad(pwd, salt, &[], &[], expected)
+    }
+
+    /// [`Argon2::verify_with_ad`], reusing the arena.
+    ///
+    /// # Errors
+    ///
+    /// As [`Argon2::hash_into`], or [`Error::VerifyMismatch`].
+    pub fn verify_with_ad(
+        &mut self,
+        pwd: &[u8],
+        salt: &[u8],
+        secret: &[u8],
+        ad: &[u8],
+        expected: &[u8],
+    ) -> Result<(), Error> {
         let argon2 = self.argon2;
-        self.verify_using(&argon2, pwd, salt, expected)
+        self.verify_using_ad(&argon2, pwd, salt, secret, ad, expected)
     }
 
     /// [`Argon2::verify_encoded`], reusing the arena.
