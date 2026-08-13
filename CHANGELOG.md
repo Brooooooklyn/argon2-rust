@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/Brooooooklyn/argon2-rust/compare/v1.0.0...v1.1.0) - 2026-08-13
+
+### Added
+
+- expose SIMD Base64, BLAKE2b, and PHC interop APIs ([#17](https://github.com/Brooooooklyn/argon2-rust/pull/17))
+
 ### Added
 
 - Public unpadded Base64 codec: [`encode_base64`] / [`decode_base64`]
