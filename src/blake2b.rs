@@ -729,7 +729,8 @@ impl Drop for Blake2b {
 ///
 /// # Errors
 ///
-/// [`Error::IncorrectParameter`] if `out.len()` is 0 or greater than [`OUTBYTES`].
+/// [`Error::IncorrectParameter`] if `out.len()` is 0 or greater than 64
+/// (BLAKE2b's digest size).
 pub fn blake2b(out: &mut [u8], input: &[u8]) -> Result<(), Error> {
     let backend = blake2b_backend();
     // SAFETY: `blake2b_backend` only returns a backend available on this CPU.

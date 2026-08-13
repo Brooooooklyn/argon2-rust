@@ -1186,7 +1186,7 @@ pub fn decode_string(encoded: &str, algorithm: Algorithm) -> Result<Decoded, Err
 ///
 /// `$v=` is still optional and still defaults to version 16.
 ///
-/// The C-style encoder ([`encode_string`], [`Argon2::hash_encoded`]) never
+/// The C-style encoder ([`encode_string`], [`crate::Argon2::hash_encoded`]) never
 /// writes `data=`. This decoder exists so a verifier can still honour strings
 /// other producers emit.
 ///
