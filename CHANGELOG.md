@@ -16,6 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Public BLAKE2b one-shots [`blake2b`] / [`blake2b_long`], plus
   [`Blake2bBackend`] and [`detected_blake2b_backend`]. Same x86 runtime
   cascade Argon2 already used (AVX-512 → AVX2 → SSE4.1 → scalar).
+- Public PHC interop: [`decode_phc`] (any order of `m`/`t`/`p`, optional
+  `data=`), [`Decoded`] (with `ad`), C-parity [`decode_string`], and
+  [`encode_string`] / [`encode_string_alloc`].
+- [`Argon2::hash_encoded_with_ad`], [`Argon2::hash_with_ad`],
+  [`Argon2::verify_with_ad`], and the matching [`Hasher`] methods. The
+  encoded form still emits a C-style PHC string (no `data=` field).
+- Crate-root [`constant_time_eq`].
+
+### Changed
+
+- PHC `$` / `,` / `=` scans use [`memchr`](https://docs.rs/memchr) (the
+  crate's first mandatory dependency). `std` enables `memchr/std` so those
+  scans share the same runtime SIMD style as the rest of the crate.
 
 ## [1.0.0](https://github.com/Brooooooklyn/argon2-rust/compare/v0.0.3...v1.0.0) - 2026-08-12
 

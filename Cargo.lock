@@ -55,6 +55,7 @@ dependencies = [
  "bumpalo",
  "codspeed-criterion-compat",
  "criterion",
+ "memchr",
 ]
 
 [[package]]

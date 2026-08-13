@@ -1052,19 +1052,52 @@ fn ad_fixture() -> (Argon2, String) {
         .build()
         .expect("params");
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut tag = [0u8; 32];
-    argon2
-        .hash_into_with_ad(AD_PWD, AD_SALT, AD_SECRET, AD_AD, &mut tag)
-        .expect("hash with ad");
-    let encoded = argon2_rust::__internal::encode_string_alloc(
-        Algorithm::Argon2id,
-        Version::V0x13,
-        &params,
-        AD_SALT,
-        &tag,
-    )
-    .expect("encode");
+    let encoded = argon2
+        .hash_encoded_with_ad(AD_PWD, AD_SALT, AD_SECRET, AD_AD)
+        .expect("encode");
+    assert!(!encoded.contains("data="));
     (argon2, encoded)
+}
+
+#[test]
+fn decode_phc_honours_data_and_mpt_order() {
+    let (argon2, _) = ad_fixture();
+    let tag = argon2
+        .hash_with_ad(AD_PWD, AD_SALT, AD_SECRET, AD_AD)
+        .expect("tag");
+    let data = argon2_rust::encode_base64(AD_AD).expect("ad b64");
+    let salt = argon2_rust::encode_base64(AD_SALT).expect("salt b64");
+    let hash = argon2_rust::encode_base64(&tag).expect("tag b64");
+    let foreign = format!("$argon2id$v=19$m=32,p=4,t=3,data={data}${salt}${hash}");
+    let decoded = argon2_rust::decode_phc(&foreign).expect("decode");
+    assert_eq!(decoded.ad, AD_AD);
+    assert_eq!(decoded.params.memory_kib(), 32);
+    assert_eq!(decoded.params.passes(), 3);
+    assert_eq!(decoded.params.lanes(), 4);
+    argon2
+        .verify_with_ad(AD_PWD, &decoded.salt, AD_SECRET, &decoded.ad, &decoded.hash)
+        .expect("must verify");
+}
+
+#[test]
+fn pooled_hash_encoded_with_ad_matches_the_one_shot() {
+    let (argon2, encoded) = ad_fixture();
+    let mut hasher = argon2.hasher();
+    let again = hasher
+        .hash_encoded_with_ad(AD_PWD, AD_SALT, AD_SECRET, AD_AD)
+        .expect("pooled encode");
+    assert_eq!(again, encoded);
+    hasher
+        .verify_with_ad(
+            AD_PWD,
+            AD_SALT,
+            AD_SECRET,
+            AD_AD,
+            &argon2
+                .hash_with_ad(AD_PWD, AD_SALT, AD_SECRET, AD_AD)
+                .unwrap(),
+        )
+        .expect("pooled verify");
 }
 
 #[test]

@@ -33,7 +33,8 @@ default = ["std", "parallel", "zeroize-memory"]
 
 # Enables runtime CPU feature detection (needs `std::arch::is_*_feature_detected!`).
 # Without it, backend selection falls back to compile-time `target_feature` cfgs.
-std = []
+# Also turns on `memchr/std` so PHC field scans use its runtime SIMD cascade.
+std = ["memchr/std"]
 
 # Multi-threaded `fill_memory_blocks` via `std::thread::scope`. Implies `std`.
 parallel = ["std"]
@@ -53,8 +54,13 @@ bump-alloc = ["dep:bumpalo"]
 internal-api = []
 
 [dependencies]
-# ZERO MANDATORY DEPENDENCIES. Keep it that way.
-#
+# `memchr` is the one mandatory dependency: PHC `$` / `,` / `=` scans go
+# through it so we do not maintain a second SIMD memchr. `default-features =
+# false` keeps it `#![no_std]`; the `std` feature below turns on its runtime
+# CPU detection, matching this crate's other cascades. Without `std` it uses
+# compile-time `target_feature` cfgs, same as our fill/Base64/BLAKE2b.
+memchr = { version = "2.8.3", default-features = false }
+
 # `bumpalo` is optional and off by default, and that is a measured decision,
 # not timidity:
 #
@@ -77,10 +83,9 @@ internal-api = []
 #     bump per call is a regression. The benchmark control therefore keeps its
 #     bump inside a reusable `Workspace`.
 #
-# 17 ns does not justify making a zero-dependency cryptographic crate depend on
-# anything on its stable paths. It does justify retaining the measured
-# counterfactual for internal tests and benches. Hence: optional, default off,
-# and not wired into `Hasher` or the encoding API.
+# 17 ns does not justify a second stable-path dependency. It does justify
+# retaining the measured counterfactual for internal tests and benches.
+# Hence: optional, default off, and not wired into `Hasher` or the encoding API.
 #
 # `default-features = false` is belt and braces: bumpalo's default feature set
 # is already empty (verified in bumpalo-3.20.3/Cargo.toml) and it is
