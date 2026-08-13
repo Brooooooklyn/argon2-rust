@@ -55,7 +55,9 @@
 //! vector kernels follow `base64-simd`/`aklomp/base64`, while inputs shorter
 //! than one vector stay on the original scalar loop. As in `base64-simd`,
 //! AVX-512-capable CPUs use this codec's AVX2 path; the wider backend remains
-//! specific to the Argon2 compression function above.
+//! specific to the Argon2 compression function above. Call [`encode_base64`]
+//! and [`decode_base64`] for that codec on its own; [`detected_base64_backend`]
+//! reports which implementation this CPU picked.
 //!
 //! # Features
 //!
@@ -240,9 +242,10 @@ pub use crate::core::{Argon2, BOUNDED_MAX_SALT_LEN, Hasher};
 // `RANDOM_SALT_LEN` is std-only because the API it describes is;
 // `BOUNDED_MAX_SALT_LEN` is not, because `verify_encoded_bounded` works without
 // `std` and a caller has to be able to name the bound it is being held to.
+pub use crate::base64::Base64Backend;
 #[cfg(feature = "std")]
 pub use crate::core::RANDOM_SALT_LEN;
-pub use crate::encoding::encoded_len;
+pub use crate::encoding::{decode_base64, encode_base64, encoded_len, from_base64, to_base64};
 pub use crate::error::Error;
 pub use crate::fill_block::Backend;
 pub use crate::params::{Algorithm, Params, Version};
@@ -258,6 +261,19 @@ pub use crate::params::{Algorithm, Params, Version};
 #[must_use]
 pub fn detected_backend() -> Backend {
     crate::fill_block::backend()
+}
+
+/// The Base64 [`Base64Backend`] this CPU resolved to, cached after the first call.
+///
+/// Diagnostic only — [`encode_base64`] and [`decode_base64`] call this for you.
+///
+/// ```
+/// println!("argon2 base64 backend: {}", argon2_rust::detected_base64_backend());
+/// ```
+#[inline]
+#[must_use]
+pub fn detected_base64_backend() -> Base64Backend {
+    crate::base64::base64_backend()
 }
 
 /// Unstable internals, exposed for this crate's own tests and benches.

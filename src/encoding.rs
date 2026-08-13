@@ -606,6 +606,59 @@ pub unsafe fn from_base64_with_backend(
     Ok((len, consumed))
 }
 
+/// Encode `src` as unpadded standard Base64, the alphabet PHC strings use.
+///
+/// Same dispatch as [`to_base64`]: SIMD when `src` is at least one vector
+/// long (16 bytes on x86, 24 on aarch64), scalar below that.
+///
+/// ```
+/// use argon2_rust::encode_base64;
+///
+/// assert_eq!(encode_base64(b"somesalt")?, "c29tZXNhbHQ");
+/// # Ok::<(), argon2_rust::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// [`Error::MemoryAllocationError`] if the output buffer cannot be allocated.
+pub fn encode_base64(src: &[u8]) -> Result<String, Error> {
+    // `to_base64` requires `dst.len() > olen` (the C writes a NUL).
+    let mut buf = alloc_zeroed_vec(b64_len_usize(src.len()) + 1)?;
+    let written = to_base64(&mut buf, src)?;
+    buf.truncate(written);
+    // The alphabet is ASCII.
+    String::from_utf8(buf).map_err(|_| Error::EncodingFail)
+}
+
+/// Decode unpadded standard Base64, the alphabet PHC strings use.
+///
+/// Same dispatch as [`from_base64`]. The whole of `src` must be alphabet
+/// characters; leftover junk is [`Error::DecodingFail`], unlike the C's
+/// `from_base64`, which stops at the first non-alphabet byte and leaves the
+/// tail for the caller. PHC fields have no tail.
+///
+/// ```
+/// use argon2_rust::decode_base64;
+///
+/// assert_eq!(decode_base64(b"c29tZXNhbHQ")?, b"somesalt");
+/// # Ok::<(), argon2_rust::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// [`Error::DecodingFail`] if `src` is not entirely valid unpadded Base64, or
+/// [`Error::MemoryAllocationError`] if the output buffer cannot be allocated.
+pub fn decode_base64(src: &[u8]) -> Result<Vec<u8>, Error> {
+    let max_len = src.len() / 4 * 3 + 3;
+    let mut buf = alloc_zeroed_vec(max_len)?;
+    let (written, consumed) = from_base64(&mut buf, src)?;
+    if consumed != src.len() {
+        return Err(Error::DecodingFail);
+    }
+    buf.truncate(written);
+    Ok(buf)
+}
+
 // ---------------------------------------------------------------------------
 // decode_decimal
 // ---------------------------------------------------------------------------
@@ -1063,6 +1116,24 @@ mod tests {
     }
 
     // -- lengths ------------------------------------------------------------
+
+    #[test]
+    fn encode_base64_matches_known_and_round_trips() {
+        assert_eq!(encode_base64(b"somesalt").unwrap(), "c29tZXNhbHQ");
+        assert_eq!(decode_base64(b"c29tZXNhbHQ").unwrap(), b"somesalt");
+        for n in [0usize, 1, 2, 8, 16, 24, 32, 48] {
+            let src: Vec<u8> = (0..n).map(|i| i as u8).collect();
+            let encoded = encode_base64(&src).unwrap();
+            assert_eq!(decode_base64(encoded.as_bytes()).unwrap(), src, "n={n}");
+        }
+    }
+
+    #[test]
+    fn decode_base64_rejects_junk_and_bad_length() {
+        assert_eq!(decode_base64(b"A"), Err(Error::DecodingFail));
+        assert_eq!(decode_base64(b"????"), Err(Error::DecodingFail));
+        assert_eq!(decode_base64(b"c29tZXNhbHQ!"), Err(Error::DecodingFail));
+    }
 
     #[test]
     fn b64_len_matches_c() {

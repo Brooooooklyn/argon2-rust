@@ -447,9 +447,10 @@ Versioning](https://semver.org/spec/v2.0.0.html):
 
 - **Covered by SemVer:** the public API under default features — crate-root
   re-exports (`Argon2`, `Hasher`, `Params`, `Algorithm`, `Version`, `Error`,
-  `Backend`, …), the `params` and `error` modules, PHC encode/verify behaviour
-  for supported versions, and the meaning of default features (`std`,
-  `parallel`, `zeroize-memory`).
+  `Backend`, `Base64Backend`, `encode_base64`, `decode_base64`, …), the
+  `params` and `error` modules, PHC encode/verify behaviour for supported
+  versions, and the meaning of default features (`std`, `parallel`,
+  `zeroize-memory`).
 - **Not covered:** the `internal-api` feature and everything under
   `__internal` (explicitly unstable; may change in a patch).
 - **MSRV** (`rust-version` in `Cargo.toml`) may rise on a **minor** release

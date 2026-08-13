@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Public unpadded Base64 codec: [`encode_base64`] / [`decode_base64`]
+  (allocating) and [`to_base64`] / [`from_base64`] (caller buffer), plus
+  [`Base64Backend`] and [`detected_base64_backend`]. Same SIMD dispatch the
+  PHC encoder already used.
+
 ## [1.0.0](https://github.com/Brooooooklyn/argon2-rust/compare/v0.0.3...v1.0.0) - 2026-08-12
 
 ### Added
