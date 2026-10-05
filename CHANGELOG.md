@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1](https://github.com/Brooooooklyn/argon2-rust/compare/v1.1.0...v1.1.1) - 2026-10-05
+
+### Other
+
+- *(deps)* update all non-major dependencies ([#18](https://github.com/Brooooooklyn/argon2-rust/pull/18))
+
 ## [1.1.0](https://github.com/Brooooooklyn/argon2-rust/compare/v1.0.0...v1.1.0) - 2026-08-13
 
 ### Added
